@@ -1,0 +1,144 @@
+{
+  "_comment": [
+    "Synthetic, modelled field for field on a real AgentJobRequestMessage captured",
+    "from github.com on 2026-07-27. Every value here is invented; the real message",
+    "carries a live ghs_ token in variables.github_token and again in the mask",
+    "array, so it is not something to check in even redacted.",
+    "",
+    "The point of this fixture is the shapes, which are not what the reference",
+    "documentation describes. See docs/protocol.md."
+  ],
+
+  "messageType": "RunnerJobRequest",
+
+  "plan": {
+    "planType": "actions",
+    "version": 0,
+    "planId": "7a0b3ee8-049d-459e-9aab-a558d241b0fc",
+    "artifactUri": "",
+    "artifactLocation": ""
+  },
+  "timeline": {
+    "id": "7a0b3ee8-049d-459e-9aab-a558d241b0fc",
+    "changeId": 0,
+    "location": null
+  },
+
+  "jobId": "0215aca7-e825-533a-9d67-e18a65311193",
+  "jobDisplayName": "smoke",
+  "jobName": "__default",
+  "requestId": 0,
+  "lockedUntil": "0001-01-01T00:00:00",
+
+  "resources": {
+    "endpoints": [
+      {
+        "name": "SystemVssConnection",
+        "url": "https://run-actions-1-azure-eastus.actions.githubusercontent.com/177/",
+        "authorization": {
+          "scheme": "OAuth",
+          "parameters": { "AccessToken": "SYNTHETIC-JOB-TOKEN" }
+        },
+        "data": {
+          "CacheServerUrl": "https://artifactcache.actions.githubusercontent.com/SYNTHETIC/",
+          "FeedStreamUrl": "wss://results-receiver.actions.githubusercontent.com/_ws/ingest.sock",
+          "ResultsServiceUrl": "https://results-receiver.actions.githubusercontent.com/",
+          "PipelinesServiceUrl": "https://pipelinesghubeus11.actions.githubusercontent.com/SYNTHETIC/"
+        },
+        "isShared": false,
+        "isReady": true
+      }
+    ]
+  },
+
+  "variables": {
+    "DistributedTask.EnableCompositeActions": { "value": "true" },
+    "system.github.job": { "value": "smoke" },
+    "github_token": { "value": "SYNTHETIC-GITHUB-TOKEN", "isSecret": true }
+  },
+
+  "mask": [
+    { "type": "regex", "value": "(?:^|[^0-9A-Za-z+/])[0-9A-Za-z+/]{40}(?:[^0-9A-Za-z+/]|$)" },
+    { "type": "value", "value": "SYNTHETIC-GITHUB-TOKEN" }
+  ],
+
+  "steps": [
+    {
+      "id": "9fb90ead-8a9f-41e3-ba77-aa6cd9982aa8",
+      "type": "action",
+      "reference": { "type": "script" },
+      "displayNameToken": { "type": 0, "lit": "Identify the machine" },
+      "contextName": "__run",
+      "condition": "success()",
+      "continueOnError": null,
+      "timeoutInMinutes": null,
+      "environment": null,
+      "inputs": {
+        "type": 2,
+        "map": [
+          {
+            "Key": { "type": 0, "lit": "script" },
+            "Value": { "type": 0, "file": 1, "line": 21, "col": 14, "lit": "uname -a\nhinv | head -5\n" }
+          }
+        ]
+      }
+    },
+    {
+      "id": "7af6531a-ce0c-4428-86c1-912de9fe206b",
+      "type": "action",
+      "reference": { "type": "script" },
+      "displayNameToken": { "type": 0, "lit": "Check the toolchain" },
+      "contextName": "__run_2",
+      "condition": "success()",
+      "inputs": {
+        "type": 2,
+        "map": [
+          { "Key": { "type": 0, "lit": "script" },
+            "Value": { "type": 0, "lit": "echo \"PATH=$PATH\"\n" } },
+          { "Key": { "type": 0, "lit": "shell" },
+            "Value": { "type": 0, "lit": "bash" } },
+          { "Key": { "type": 0, "lit": "workingDirectory" },
+            "Value": { "type": 0, "lit": "sub/dir" } }
+        ]
+      }
+    }
+  ],
+
+  "contextData": {
+    "github": {
+      "t": 2,
+      "d": [
+        { "k": "ref", "v": "refs/heads/main" },
+        { "k": "sha", "v": "b8d1e6523d9961079ec9dc634035b8960498bf1b" },
+        { "k": "repository", "v": "sgidevnet/irix-actions-runner" },
+        { "k": "repository_owner", "v": "sgidevnet" },
+        { "k": "repositoryUrl", "v": "git://github.com/sgidevnet/irix-actions-runner.git" },
+        { "k": "run_id", "v": "30274741877" },
+        { "k": "run_number", "v": "3" },
+        { "k": "run_attempt", "v": "1" },
+        { "k": "actor", "v": "mach-kernel" },
+        { "k": "workflow", "v": "irix" },
+        { "k": "event_name", "v": "push" },
+        { "k": "server_url", "v": "https://github.com" },
+        { "k": "api_url", "v": "https://api.github.com" },
+        { "k": "graphql_url", "v": "https://api.github.com/graphql" },
+        { "k": "workspace", "v": "/home/runner/work/irix-actions-runner/irix-actions-runner" }
+      ]
+    },
+    "job": { "t": 2, "d": [ { "k": "check_run_id", "v": 90005817181 } ] },
+    "inputs": { "t": 2, "d": [] },
+    "matrix": null,
+    "needs": { "t": 2, "d": [] },
+    "strategy": { "t": 2, "d": [ { "k": "fail-fast", "v": true }, { "k": "job-index", "v": 0 } ] },
+    "vars": { "t": 2, "d": [] },
+    "runner": null
+  },
+
+  "environmentVariables": [],
+  "defaults": [],
+  "jobOutputs": null,
+  "jobContainer": null,
+  "jobServiceContainers": null,
+  "fileTable": [ ".github/workflows/irix.yml" ],
+  "billingOwnerId": "O_SYNTHETIC"
+}
