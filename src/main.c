@@ -2,9 +2,12 @@
 #include "json/json.h"
 #include "net/http.h"
 #include "proto/config.h"
+#include "proto/listener.h"
+#include "proto/oauth.h"
 #include "proto/register.h"
 #include "version.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +26,9 @@ usage(void)
 	      "      --labels A,B,C     extra labels beyond irix,mips,mips-n32\n"
 	      "      --work DIR         work folder, default _work\n"
 	      "      --replace          take over an existing runner of this name\n"
+	      "\n"
+	      "  run [--verbose|--trace]\n"
+	      "      listen for jobs; this is what makes the runner show Online\n"
 	      "\n"
 	      "  remove --token TOKEN   deregister and delete local configuration\n"
 	      "  status                 show the configured runner\n"
@@ -194,6 +200,143 @@ cmd_remove(int argc, char **argv)
 	return rc == 0 ? 0 : 1;
 }
 
+static volatile sig_atomic_t stop_requested;
+
+static void
+on_signal(int sig)
+{
+	(void)sig;
+	stop_requested = 1;
+}
+
+/*
+ * Until job execution exists, messages are reported and discarded. Returning 0
+ * keeps the loop running, which is what makes the runner sit Online.
+ */
+/* Lets a blocked long poll surface a SIGTERM instead of running to completion. */
+static int
+should_abort(void *ctx)
+{
+	(void)ctx;
+	return stop_requested != 0;
+}
+
+static int
+report_message(void *ctx, const sgug_message *msg)
+{
+	int *seen = ctx;
+
+	(*seen)++;
+
+	if (strcmp(msg->type, "PipelineAgentJobRequest") == 0 ||
+	    strcmp(msg->type, "RunnerJobRequest") == 0) {
+		printf("          job request received; execution is not "
+		    "implemented yet\n");
+	}
+	if (getenv("SGUG_DUMP_MESSAGES") != NULL)
+		printf("          body: %.*s\n", (int)msg->body_len, msg->body);
+	fflush(stdout);
+	return 0;
+}
+
+static int
+cmd_run(int argc, char **argv)
+{
+	sgug_listener_opts opts;
+	sgug_config cfg;
+	sgug_http_client *http;
+	sgug_oauth *oauth;
+	sgug_rsa *key;
+	char keypath[SGUG_MAX_URL];
+	char err[512];
+	int seen = 0, verbose = 0, i, rc;
+
+	for (i = 2; i < argc; i++) {
+		if (strcmp(argv[i], "--verbose") == 0)
+			verbose = 1;
+		else if (strcmp(argv[i], "--trace") == 0)
+			verbose = 2;
+		else {
+			fprintf(stderr, "unknown option %s\n", argv[i]);
+			return 2;
+		}
+	}
+
+	if (sgug_config_load(&cfg, ".") != 0) {
+		fprintf(stderr, "no runner configured in this directory; run "
+		    "`runner configure` first\n");
+		return 1;
+	}
+
+	sgug_config_path(".", ".rsakey", keypath, sizeof(keypath));
+	key = sgug_rsa_load(keypath);
+	if (key == NULL) {
+		fprintf(stderr, "cannot load %s\n", keypath);
+		return 1;
+	}
+
+	http = sgug_http_client_new(NULL, SGUG_USER_AGENT);
+	if (http == NULL) {
+		fprintf(stderr, "http client: %s\n", sgug_http_last_error());
+		sgug_rsa_free(key);
+		return 1;
+	}
+
+	sgug_http_set_abort_check(http, should_abort, NULL);
+
+	oauth = sgug_oauth_new(http, &cfg, key);
+	if (oauth == NULL) {
+		sgug_http_client_free(http);
+		sgug_rsa_free(key);
+		return 1;
+	}
+
+	/*
+	 * sigaction without SA_RESTART, deliberately. signal() installs
+	 * restarting handlers, which means a SIGTERM arriving during a long
+	 * poll is not seen until the poll returns, up to two minutes later, and
+	 * the session is never torn down so the runner lingers Online. Without
+	 * SA_RESTART the read fails with EINTR, the poll returns, and the loop
+	 * exits within a second.
+	 *
+	 * SIGINT and SIGTERM only. Never touch 47 or 48; IRIX libpthread
+	 * reserves them and handling them corrupts the threading runtime.
+	 */
+	{
+		struct sigaction sa;
+
+		memset(&sa, 0, sizeof(sa));
+		sa.sa_handler = on_signal;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = 0;
+		sigaction(SIGINT, &sa, NULL);
+		sigaction(SIGTERM, &sa, NULL);
+	}
+	signal(SIGPIPE, SIG_IGN);
+
+	memset(&opts, 0, sizeof(opts));
+	opts.http = http;
+	opts.cfg = &cfg;
+	opts.oauth = oauth;
+	opts.key = key;
+	opts.on_message = report_message;
+	opts.ctx = &seen;
+	opts.stop = &stop_requested;
+	opts.verbose = verbose;
+
+	err[0] = '\0';
+	rc = sgug_listen(&opts, err, sizeof(err));
+	if (rc != 0 && err[0] != '\0')
+		fprintf(stderr, "%s\n", err);
+
+	printf("\nstopped after %d message(s)\n", seen);
+
+	sgug_oauth_free(oauth);
+	sgug_http_client_free(http);
+	sgug_rsa_free(key);
+	return rc == 0 ? 0 : 1;
+}
+
 static int
 cmd_status(void)
 {
@@ -313,6 +456,8 @@ main(int argc, char **argv)
 		return cmd_configure(argc, argv);
 	if (strcmp(argv[1], "remove") == 0)
 		return cmd_remove(argc, argv);
+	if (strcmp(argv[1], "run") == 0)
+		return cmd_run(argc, argv);
 	if (strcmp(argv[1], "status") == 0)
 		return cmd_status();
 

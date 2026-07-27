@@ -218,46 +218,56 @@ sgug_rsa_decrypt_oaep(const sgug_rsa *k, const unsigned char *ct,
 		return -1;
 
 	/*
-	 * RSA_private_decrypt only offers OAEP-SHA1. The SHA-256 variant needs
-	 * the EVP interface to set the digest, so the two paths differ.
+	 * Both paths decrypt into a modulus-sized scratch buffer and copy the
+	 * recovered plaintext out afterwards.
+	 *
+	 * That is not just tidiness: OpenSSL rejects an OAEP decryption whose
+	 * output buffer is smaller than RSA_size, because it recovers the padded
+	 * block before unpadding it. Passing the 32 bytes the session key
+	 * actually occupies fails with a bare "bad length" from the provider.
 	 */
 	if (!use_sha256) {
 		n = RSA_private_decrypt((int)ct_len, ct, buf, k->rsa,
 		    RSA_PKCS1_OAEP_PADDING);
-		if (n < 0 || (size_t)n > outlen)
-			return -1;
-		memcpy(out, buf, (size_t)n);
-		return n;
 	} else {
+		/* RSA_private_decrypt only offers OAEP-SHA1, so selecting the
+		 * digest requires the EVP interface. */
 		EVP_PKEY *pkey = NULL;
 		EVP_PKEY_CTX *pctx = NULL;
-		size_t len = outlen;
-		int rc = -1;
+		size_t len = sizeof(buf);
+
+		n = -1;
 
 		pkey = EVP_PKEY_new();
 		if (pkey == NULL)
-			goto out;
+			goto done;
 		if (EVP_PKEY_set1_RSA(pkey, k->rsa) != 1)
-			goto out;
+			goto done;
 
 		pctx = EVP_PKEY_CTX_new(pkey, NULL);
 		if (pctx == NULL || EVP_PKEY_decrypt_init(pctx) != 1)
-			goto out;
+			goto done;
 		if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_OAEP_PADDING) != 1)
-			goto out;
+			goto done;
 		if (EVP_PKEY_CTX_set_rsa_oaep_md(pctx, EVP_sha256()) != 1)
-			goto out;
+			goto done;
 		if (EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, EVP_sha256()) != 1)
-			goto out;
+			goto done;
 
-		if (EVP_PKEY_decrypt(pctx, out, &len, ct, ct_len) != 1)
-			goto out;
+		if (EVP_PKEY_decrypt(pctx, buf, &len, ct, ct_len) == 1)
+			n = (int)len;
 
-		rc = (int)len;
-
-	out:
+	done:
 		EVP_PKEY_CTX_free(pctx);
 		EVP_PKEY_free(pkey);
-		return rc;
 	}
+
+	if (n < 0 || (size_t)n > outlen) {
+		explicit_bzero(buf, sizeof(buf));
+		return -1;
+	}
+
+	memcpy(out, buf, (size_t)n);
+	explicit_bzero(buf, sizeof(buf));
+	return n;
 }

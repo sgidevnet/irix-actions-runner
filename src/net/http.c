@@ -4,6 +4,8 @@
 #include "net/tls.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,7 +52,16 @@ struct sgug_http_client {
 
 	sgug_time_t skew;
 	int skew_valid;
+
+	int (*abort_cb)(void *);
+	void *abort_ctx;
 };
+
+/*
+ * Bounds how long a single socket read blocks. The overall wait is still the
+ * caller's timeout; this only sets how often we surface to check for shutdown.
+ */
+#define READ_SLICE_MS 2000
 
 static pthread_key_t errkey;
 static pthread_once_t err_once = PTHREAD_ONCE_INIT;
@@ -83,6 +94,15 @@ set_error(const char *fmt, const char *a)
 	sgug_snprintf(buf, 256, fmt, a);
 }
 
+void
+sgug_http_set_abort_check(sgug_http_client *c, int (*cb)(void *), void *ctx)
+{
+	if (c == NULL)
+		return;
+	c->abort_cb = cb;
+	c->abort_ctx = ctx;
+}
+
 const char *
 sgug_http_last_error(void)
 {
@@ -91,6 +111,64 @@ sgug_http_last_error(void)
 	pthread_once(&err_once, init_errkey);
 	buf = pthread_getspecific(errkey);
 	return buf != NULL ? buf : "";
+}
+
+/*
+ * One read, retried across slice timeouts until the deadline or an abort.
+ * Returns bytes read, 0 at EOF, or -1.
+ */
+static int
+read_slice(sgug_http_client *c, void *buf, size_t len, int64_t deadline_ms)
+{
+	for (;;) {
+		int n, pr, perr;
+
+		/*
+		 * Checked first, every iteration, and independent of poll's
+		 * result. Deriving the decision from errno after poll is
+		 * fragile: any intervening call may clobber it, and then a
+		 * SIGTERM that interrupted the wait is silently ignored and the
+		 * runner takes a full 50 second poll cycle to stop.
+		 */
+		if (c->abort_cb != NULL && c->abort_cb(c->abort_ctx) != 0) {
+			set_error("aborted%s", "");
+			return -1;
+		}
+		if (sgug_monotonic_ms() >= deadline_ms) {
+			set_error("timed out waiting for response%s", "");
+			return -1;
+		}
+
+		/*
+		 * poll rather than SO_RCVTIMEO: IRIX 6.5 rejects that option
+		 * with EPROTONOSUPPORT, so a socket-level read deadline does not
+		 * exist there and a stalled peer would block forever.
+		 *
+		 * Skipped when OpenSSL already holds decrypted bytes, which the
+		 * descriptor will never signal.
+		 */
+		if (sgug_tls_pending(c->conn) == 0) {
+			struct pollfd pfd;
+
+			pfd.fd = sgug_tls_fd(c->conn);
+			pfd.events = POLLIN;
+			pfd.revents = 0;
+
+			pr = poll(&pfd, 1, READ_SLICE_MS);
+			perr = pr < 0 ? errno : 0;
+
+			if (pr == 0 || (pr < 0 && perr == EINTR))
+				continue;
+			if (pr < 0) {
+				set_error("poll: %s", strerror(perr));
+				return -1;
+			}
+		}
+
+		n = sgug_tls_read(c->conn, buf, len);
+		if (n != SGUG_TLS_TIMEOUT)
+			return n;
+	}
 }
 
 static int
@@ -244,7 +322,12 @@ ensure_conn(sgug_http_client *c, const struct url *u, int timeout_ms)
 		return -1;
 	}
 	sgug_tcp_set_nodelay(fd);
-	sgug_tcp_set_timeouts(fd, timeout_ms, timeout_ms);
+	/*
+	 * Deliberately short, and unrelated to the caller's timeout: it decides
+	 * how often a blocked read surfaces so shutdown can be noticed. The real
+	 * deadline is enforced in read_slice.
+	 */
+	sgug_tcp_set_timeouts(fd, READ_SLICE_MS, timeout_ms);
 
 	c->conn = sgug_tls_connect(c->tls_ctx, fd, u->host);
 	if (c->conn == NULL) {
@@ -365,7 +448,8 @@ sgug_http_body(const sgug_http_resp *r, size_t *len)
 
 /* Reads until the buffer holds the end of the header block. */
 static int
-read_headers(sgug_tls *conn, struct buf *b, size_t *hdr_end)
+read_headers(sgug_http_client *c, struct buf *b, size_t *hdr_end,
+    int64_t deadline_ms)
 {
 	for (;;) {
 		char tmp[READ_CHUNK];
@@ -382,11 +466,9 @@ read_headers(sgug_tls *conn, struct buf *b, size_t *hdr_end)
 			return -1;
 		}
 
-		n = sgug_tls_read(conn, tmp, sizeof(tmp));
-		if (n < 0) {
-			set_error("read: %s", sgug_tls_last_error());
+		n = read_slice(c, tmp, sizeof(tmp), deadline_ms);
+		if (n < 0)
 			return -1;
-		}
 		if (n == 0) {
 			set_error("connection closed before headers%s", "");
 			return -1;
@@ -397,7 +479,8 @@ read_headers(sgug_tls *conn, struct buf *b, size_t *hdr_end)
 }
 
 static int
-read_exact(sgug_tls *conn, struct buf *b, size_t have, size_t want)
+read_exact(sgug_http_client *c, struct buf *b, size_t have, size_t want,
+    int64_t deadline_ms)
 {
 	while (have < want) {
 		char tmp[READ_CHUNK];
@@ -407,9 +490,10 @@ read_exact(sgug_tls *conn, struct buf *b, size_t have, size_t want)
 		if (need > sizeof(tmp))
 			need = sizeof(tmp);
 
-		n = sgug_tls_read(conn, tmp, need);
+		n = read_slice(c, tmp, need, deadline_ms);
 		if (n <= 0) {
-			set_error("truncated body%s", "");
+			if (n == 0)
+				set_error("truncated body%s", "");
 			return -1;
 		}
 		if (buf_append(b, tmp, (size_t)n) != 0)
@@ -424,7 +508,8 @@ read_exact(sgug_tls *conn, struct buf *b, size_t have, size_t want)
  * and job responses whose length is not known when the headers are sent.
  */
 static int
-decode_chunked(sgug_tls *conn, struct buf *b, size_t start, struct buf *out)
+decode_chunked(sgug_http_client *c, struct buf *b, size_t start,
+    struct buf *out, int64_t deadline_ms)
 {
 	size_t pos = start;
 
@@ -436,10 +521,11 @@ decode_chunked(sgug_tls *conn, struct buf *b, size_t start, struct buf *out)
 		/* Pull more until a full size line is present. */
 		while ((line_end = strstr(b->p + pos, "\r\n")) == NULL) {
 			char tmp[READ_CHUNK];
-			int n = sgug_tls_read(conn, tmp, sizeof(tmp));
+			int n = read_slice(c, tmp, sizeof(tmp), deadline_ms);
 
 			if (n <= 0) {
-				set_error("truncated chunk header%s", "");
+				if (n == 0)
+					set_error("truncated chunk header%s", "");
 				return -1;
 			}
 			if (buf_append(b, tmp, (size_t)n) != 0)
@@ -453,7 +539,7 @@ decode_chunked(sgug_tls *conn, struct buf *b, size_t start, struct buf *out)
 		if (size == 0)
 			return 0;
 
-		if (read_exact(conn, b, b->len - pos, size + 2) != 0)
+		if (read_exact(c, b, b->len - pos, size + 2, deadline_ms) != 0)
 			return -1;
 
 		if (buf_append(out, b->p + pos, size) != 0)
@@ -504,6 +590,7 @@ do_request(sgug_http_client *c, const char *method, const struct url *u,
 {
 	struct buf raw, decoded;
 	char head[4096];
+	int64_t deadline = sgug_monotonic_ms() + timeout_ms;
 	size_t i, off = 0, hdr_end = 0;
 	const char *cl, *te;
 	char *line, *nl;
@@ -559,7 +646,7 @@ do_request(sgug_http_client *c, const char *method, const struct url *u,
 		return -1;
 	}
 
-	if (read_headers(c->conn, &raw, &hdr_end) != 0) {
+	if (read_headers(c, &raw, &hdr_end, deadline) != 0) {
 		drop_conn(c);
 		if (retry_ok && raw.len == 0)
 			return do_request(c, method, u, headers, nheaders,
@@ -591,7 +678,7 @@ do_request(sgug_http_client *c, const char *method, const struct url *u,
 	cl = sgug_http_header(r, "Content-Length");
 
 	if (te != NULL && strcasestr(te, "chunked") != NULL) {
-		if (decode_chunked(c->conn, &raw, hdr_end, &decoded) != 0)
+		if (decode_chunked(c, &raw, hdr_end, &decoded, deadline) != 0)
 			goto out;
 		r->body = decoded.p;
 		r->body_len = decoded.len;
@@ -600,7 +687,7 @@ do_request(sgug_http_client *c, const char *method, const struct url *u,
 		size_t want = (size_t)strtoul(cl, NULL, 10);
 		size_t have = raw.len - hdr_end;
 
-		if (read_exact(c->conn, &raw, have, want) != 0)
+		if (read_exact(c, &raw, have, want, deadline) != 0)
 			goto out;
 
 		r->body = malloc(want + 1);
@@ -619,7 +706,7 @@ do_request(sgug_http_client *c, const char *method, const struct url *u,
 		/* No length and no chunking means the body ends at EOF. */
 		for (;;) {
 			char tmp[READ_CHUNK];
-			int n = sgug_tls_read(c->conn, tmp, sizeof(tmp));
+			int n = read_slice(c, tmp, sizeof(tmp), deadline);
 
 			if (n < 0)
 				goto out;

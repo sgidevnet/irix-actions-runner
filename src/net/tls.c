@@ -2,6 +2,7 @@
 
 #include "compat/irix.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,7 +127,6 @@ sgug_tls_ctx_new(const char *ca_bundle)
 	}
 
 	SSL_CTX_set_verify(ctx->ssl_ctx, SSL_VERIFY_PEER, NULL);
-	SSL_CTX_set_mode(ctx->ssl_ctx, SSL_MODE_AUTO_RETRY);
 	SSL_CTX_set_session_cache_mode(ctx->ssl_ctx, SSL_SESS_CACHE_CLIENT);
 
 	if (SSL_CTX_set_cipher_list(ctx->ssl_ctx, CIPHERS_TLS12) != 1) {
@@ -239,7 +239,13 @@ sgug_tls_read(sgug_tls *tls, void *buf, size_t len)
 	switch (SSL_get_error(tls->ssl, n)) {
 	case SSL_ERROR_ZERO_RETURN:
 		return 0;
+	case SSL_ERROR_WANT_READ:
+	case SSL_ERROR_WANT_WRITE:
+		/* With SO_RCVTIMEO set, a quiet socket surfaces here. */
+		return SGUG_TLS_TIMEOUT;
 	case SSL_ERROR_SYSCALL:
+		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+			return SGUG_TLS_TIMEOUT;
 		/* A truncated close is routine with `Connection: close`. */
 		if (ERR_peek_error() == 0)
 			return 0;
@@ -271,6 +277,18 @@ sgug_tls_write(sgug_tls *tls, const void *buf, size_t len)
 		sent += (size_t)n;
 	}
 	return (int)sent;
+}
+
+int
+sgug_tls_fd(const sgug_tls *tls)
+{
+	return tls != NULL ? tls->fd : -1;
+}
+
+int
+sgug_tls_pending(const sgug_tls *tls)
+{
+	return tls != NULL ? SSL_pending(tls->ssl) : 0;
 }
 
 const char *

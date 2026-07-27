@@ -336,6 +336,35 @@ test_rsa_oaep_roundtrip(void)
 	/* Wrong OAEP digest must fail rather than return garbage. */
 	CHECK(sgug_rsa_decrypt_oaep(k, ct, (size_t)ctlen, 1, out, sizeof(out)) < 0);
 
+	/*
+	 * The SHA-256 variant, which is what github.com actually uses to wrap
+	 * the session key even when useFipsEncryption is false. Encrypt through
+	 * EVP so the test drives the same digest the service does.
+	 */
+	{
+		EVP_PKEY *pk = EVP_PKEY_new();
+		EVP_PKEY_CTX *ec;
+		size_t clen = sizeof(ct);
+
+		CHECK(pk != NULL && EVP_PKEY_set1_RSA(pk, pub) == 1);
+		ec = EVP_PKEY_CTX_new(pk, NULL);
+		CHECK(ec != NULL);
+		CHECK(EVP_PKEY_encrypt_init(ec) == 1);
+		CHECK(EVP_PKEY_CTX_set_rsa_padding(ec, RSA_PKCS1_OAEP_PADDING) == 1);
+		CHECK(EVP_PKEY_CTX_set_rsa_oaep_md(ec, EVP_sha256()) == 1);
+		CHECK(EVP_PKEY_CTX_set_rsa_mgf1_md(ec, EVP_sha256()) == 1);
+		CHECK(EVP_PKEY_encrypt(ec, ct, &clen, session_key,
+		    sizeof(session_key)) == 1);
+		CHECK_EQ_INT((long)clen, 256);
+
+		n = sgug_rsa_decrypt_oaep(k, ct, clen, 1, out, sizeof(out));
+		CHECK_EQ_INT(n, 32);
+		CHECK(n == 32 && memcmp(out, session_key, 32) == 0);
+
+		EVP_PKEY_CTX_free(ec);
+		EVP_PKEY_free(pk);
+	}
+
 	RSA_free(pub);
 	sgug_rsa_free(k);
 }
@@ -391,10 +420,14 @@ test_jwt_structure(void)
 	CHECK(n > 0);
 	dec[n > 0 ? n : 0] = '\0';
 
-	/* nbf is backdated 30s and exp is nbf+330, giving the five minute
-	 * lifetime the service expects plus the skew allowance. */
+	/*
+	 * nbf is backdated 30s for skew, and exp is nbf plus exactly 300s. The
+	 * service measures lifetime as exp minus nbf and rejects anything over
+	 * five minutes with a bare invalid_client, so the window must be 300
+	 * and not 330.
+	 */
 	CHECK(strstr((char *)dec, "\"nbf\":1785118351") != NULL);
-	CHECK(strstr((char *)dec, "\"exp\":1785118681") != NULL);
+	CHECK(strstr((char *)dec, "\"exp\":1785118651") != NULL);
 	CHECK(strstr((char *)dec, "\"iss\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\"") != NULL);
 	CHECK(strstr((char *)dec, "\"sub\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\"") != NULL);
 	/* No kid and no x5t: the service keys off client_id. */

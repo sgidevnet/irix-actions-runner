@@ -29,10 +29,27 @@ void sgug_tls_ctx_free(sgug_tls_ctx *ctx);
 sgug_tls *sgug_tls_connect(sgug_tls_ctx *ctx, int fd, const char *host);
 void sgug_tls_free(sgug_tls *tls);
 
-/* Return bytes transferred, 0 at clean EOF, or -1. Both retry the OpenSSL
- * WANT_READ/WANT_WRITE cycle internally, so a short return is real. */
+/*
+ * Return bytes transferred, 0 at clean EOF, -1 on error, or SGUG_TLS_TIMEOUT
+ * when the socket receive timeout elapsed with no data.
+ *
+ * The timeout is not a failure: it is how a caller waiting on a long poll gets
+ * control back periodically to check whether it has been asked to shut down.
+ */
+#define SGUG_TLS_TIMEOUT (-2)
 int sgug_tls_read(sgug_tls *tls, void *buf, size_t len);
 int sgug_tls_write(sgug_tls *tls, const void *buf, size_t len);
+
+/*
+ * Underlying socket, for poll(). Needed because IRIX 6.5 does not implement
+ * SO_RCVTIMEO, so read deadlines have to be enforced by polling the descriptor
+ * rather than by the socket layer.
+ */
+int sgug_tls_fd(const sgug_tls *tls);
+
+/* Bytes already decrypted and buffered inside OpenSSL. Must be checked before
+ * polling: data sitting here will never make the descriptor readable. */
+int sgug_tls_pending(const sgug_tls *tls);
 
 /* Negotiated protocol and cipher, for diagnostics. Valid while tls lives. */
 const char *sgug_tls_version(const sgug_tls *tls);

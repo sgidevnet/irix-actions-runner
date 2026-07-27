@@ -65,6 +65,17 @@ sgug_time_t sgug_http_skew(const sgug_http_client *c);
  * only once the skew exceeds the threshold above. Use this for JWT claims. */
 sgug_time_t sgug_http_now(const sgug_http_client *c);
 
+/*
+ * Optional shutdown check, consulted whenever a socket read times out with the
+ * response still incomplete. Return non-zero to abandon the request.
+ *
+ * Without it a request blocked on the 50 second long poll cannot be
+ * interrupted, so a SIGTERM takes up to a full poll cycle to take effect and
+ * service management looks hung.
+ */
+void sgug_http_set_abort_check(sgug_http_client *c, int (*cb)(void *),
+    void *ctx);
+
 const char *sgug_http_last_error(void);
 
 #endif /* SGUG_NET_HTTP_H */

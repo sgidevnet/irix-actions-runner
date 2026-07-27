@@ -64,6 +64,9 @@ produces runtime crashes, not compile errors.
 7. `vsnprintf(NULL, 0, ...)` returns -1. Do not use it to size buffers.
 8. `mode_t` is `unsigned long`. Format with `%lo`.
 9. No `MAP_ANON`, no `O_NOFOLLOW`, no `*at` family, no `posix_spawn`.
+   **`SO_RCVTIMEO` and `SO_SNDTIMEO` are rejected outright** with
+   `EPROTONOSUPPORT`, so socket read deadlines must be built from `poll(2)`.
+   Without that a stalled peer blocks forever.
 10. `time_t` is 32-bit in every IRIX ABI and wraps in 2038. Use `int64_t` internally and
    narrow only at syscall boundaries.
 11. Missing from IRIX libc, supply via `src/compat/`: `strnlen`, `memmem`, `strcasestr`,

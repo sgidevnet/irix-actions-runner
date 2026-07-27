@@ -55,8 +55,14 @@ sgug_jwt_client_assertion(const sgug_rsa *key, const char *client_id,
 	if (make_jti(jti, sizeof(jti)) < 0)
 		return -1;
 
+	/*
+	 * The service measures lifetime as exp minus nbf and rejects anything
+	 * over five minutes, so exp is computed from nbf rather than from now.
+	 * Backdating nbf and still adding the full lifetime to now yields a 5:30
+	 * window and a bare invalid_client with no explanation in the body.
+	 */
 	nbf = now - NBF_BACKDATE;
-	exp = now + ASSERTION_LIFETIME;
+	exp = nbf + ASSERTION_LIFETIME;
 
 	n = sgug_snprintf(header, sizeof(header),
 	    "{\"typ\":\"JWT\",\"alg\":\"%s\"}", use_pss ? "PS256" : "RS256");
