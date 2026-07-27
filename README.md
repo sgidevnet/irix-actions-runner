@@ -58,19 +58,28 @@ work to IRIX in a separate job.
 
 ## Runner identity
 
-The runner claims an identity in six places. They are not equally consequential.
+The machine runs IRIX 6.5 on a big-endian MIPS R12000. The runner tells GitHub it is
+Linux on x86-64.
 
-| Reported | Sent at | Consumed by | Effect |
-|---|---|---|---|
-| `Linux` label | registration | `runs-on` matching | Required. Without it `runs-on: [self-hosted, linux]` never schedules here |
-| `X64` label | registration | `runs-on` matching | Required for the usual `runs-on: [self-hosted, linux, x64]` |
-| `irix`, `mips`, `mips-n32`, model | registration | `runs-on` matching | Lets a workflow target this machine on purpose |
-| `osDescription` | registration | runner list in the UI | Display only. Reads `IRIX 6.5 mips` |
-| `runnerOS`, `os=` | `acquirejob`, message poll | nothing | Not validated. A job ran reporting `IRIX` and the service neither rejected nor noticed it |
-| `RUNNER_OS` | each step's environment | `if:` conditions | Changes which branches a workflow takes |
+It has to. GitHub's system labels are a fixed vocabulary with no IRIX or MIPS value, and
+ordinary workflows are written `runs-on: [self-hosted, linux, x64]`. A runner that
+described itself accurately would match nothing and never be given a job.
 
-Only the first two are untrue. GitHub's system label vocabulary has no MIPS or IRIX value,
-and ordinary workflows are written `runs-on: [self-hosted, linux, x64]`.
+Here is every place an identity is reported, and whether it is honest:
+
+| Reported | Value sent | Accurate | Consumed by | Effect |
+|---|---|---|---|---|
+| system label | `Linux` | no, it is IRIX | `runs-on` matching | Required. Without it `runs-on: [self-hosted, linux]` never schedules here |
+| system label | `X64` | no, it is MIPS n32 | `runs-on` matching | Required for the usual `runs-on: [self-hosted, linux, x64]` |
+| user labels | `irix`, `mips`, `mips-n32`, model | yes | `runs-on` matching | Lets a workflow target this machine on purpose |
+| `osDescription` | `IRIX 6.5 mips` | yes | runner list in the UI | Display only |
+| `runnerOS`, `os=` | `Linux` | no | nothing | Not validated. A job ran reporting `IRIX` and the service neither rejected nor noticed it |
+| `RUNNER_OS` | `Linux` | no, by default | `if:` conditions in the workflow | Changes which branches a workflow takes |
+
+The labels have to stay wrong for the runner to be usable. `runnerOS` and `os=` are sent
+as `Linux` for consistency rather than necessity: nothing reads them today, and if the
+service ever starts checking, a known value is the safer thing to have been sending.
+`RUNNER_OS` is the only one you would want to change, and it is a flag.
 
 Target the machine deliberately with the user labels:
 
