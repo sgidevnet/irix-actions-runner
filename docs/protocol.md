@@ -199,14 +199,52 @@ twirp/results.services.receiver.Receiver/
 twirp/github.actions.results.api.v1.WorkflowStepUpdateService/
 ```
 
-Log upload is a three-step dance per step:
+Exact contract, from `src/Sdk/WebApi/WebApi/ResultsHttpClient.cs` in the runner
+at v2.336.0. Every call is `POST`, JSON in and JSON out, with
+`Authorization: Bearer <job token>` and `Accept: application/json`.
 
-1. `GetStepLogsSignedBlobURL` returns a signed Azure blob URL
-2. `PUT` the log bytes to that URL
-3. `CreateStepLogsMetadata` registers the upload against the step
+Routes, all relative to `ResultsServiceUrl`:
 
-The same pair exists for whole-job logs, `GetJobLogsSignedBlobURL` and
-`CreateJobLogsMetadata`, and for step summaries.
+```
+twirp/results.services.receiver.Receiver/GetStepLogsSignedBlobURL
+twirp/results.services.receiver.Receiver/CreateStepLogsMetadata
+twirp/results.services.receiver.Receiver/GetJobLogsSignedBlobURL
+twirp/results.services.receiver.Receiver/CreateJobLogsMetadata
+twirp/github.actions.results.api.v1.WorkflowStepUpdateService/WorkflowStepsUpdate
+```
+
+The two backend ids are not new identifiers, they are ones we already hold:
+
+```
+workflow_run_backend_id      = plan.planId
+workflow_job_run_backend_id  = jobId
+step_backend_id              = the step's id
+```
+
+Upload is three calls per step: get a signed URL, PUT the bytes to it, then
+register the result.
+
+```
+CreateStepLogsMetadata
+{"workflow_job_run_backend_id": jobId, "workflow_run_backend_id": planId,
+ "step_backend_id": stepId, "uploaded_at": <timestamp>, "line_count": N}
+```
+
+The same pair exists for whole-job logs and for step summaries.
+
+### Live streaming needs no WebSocket
+
+`FeedStreamUrl` is a `wss://` address and the assemblies do contain a full
+RFC 6455 client, which makes a WebSocket look mandatory. It is not.
+
+The runner streams by asking for a blob with
+`x-ms-blob-type: AppendBlob` instead of `BlockBlob` and appending blocks as the
+step produces output, then finalising with the sealed header. Step state
+updates ride on `WorkflowStepsUpdate`. Both are ordinary HTTPS requests.
+
+That matters here: a WebSocket client would have been roughly 250 lines of
+handshake and client-masked framing, and appending to a blob reuses the HTTP
+client that already exists.
 
 Until this is implemented, steps appear in the UI with the right names and
 results but cannot be expanded, because there is no log to show.
