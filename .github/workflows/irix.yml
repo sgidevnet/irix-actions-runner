@@ -1,0 +1,28 @@
+name: irix
+
+# Runs on the SGI Octane2 via this repository's own runner.
+#
+# Kept deliberately small: it exists to prove the runner executes a job end to
+# end, not to build anything. timeout-minutes is short because a runner that
+# accepts a job and then dies would otherwise hold the queue for six hours.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/irix.yml'
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, irix]
+    timeout-minutes: 5
+    steps:
+      - name: Identify the machine
+        run: |
+          uname -a
+          hinv | head -5
+
+      - name: Check the toolchain
+        run: |
+          echo "PATH=$PATH"
+          /usr/sgug/bin/gcc --version | head -1
