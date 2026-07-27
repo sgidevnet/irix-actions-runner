@@ -22,10 +22,11 @@ jobs:
         run: |
           uname -a
           mkdir -p out
-          gcc -O2 -o out/hello - <<'EOF'
+          cat > hello.c <<'EOF'
           #include <stdio.h>
           int main(void){ printf("built on IRIX\n"); return 0; }
           EOF
+          gcc -O2 -o out/hello hello.c
           ./out/hello
           file out/hello
 

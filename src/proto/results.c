@@ -509,6 +509,14 @@ sgug_artifact_upload(sgug_results *r, const char *name, const char *zip_path,
 	sgug_jsonw_str(w, name);
 	sgug_jsonw_key(w, "version");
 	sgug_jsonw_int(w, ARTIFACT_VERSION);
+	/*
+	 * Required, despite being a wrapper type that reads as optional in the
+	 * generated client. Omitting it fails with "a valid mime_type is
+	 * required for this artifact". A protobuf StringValue serialises as a
+	 * bare string in Twirp JSON.
+	 */
+	sgug_jsonw_key(w, "mime_type");
+	sgug_jsonw_str(w, "application/zip");
 	sgug_jsonw_obj_end(w);
 
 	body = sgug_jsonw_done(w, &body_len);
