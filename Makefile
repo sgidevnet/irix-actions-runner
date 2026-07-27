@@ -1,0 +1,74 @@
+UNAME_S := $(shell uname -s)
+
+BUILD   := build
+# Everything except main.c, so the test binary can supply its own entry point.
+LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c)
+SRCS      := $(LIB_SRCS) src/main.c
+LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/%.o)
+OBJS      := $(SRCS:%.c=$(BUILD)/%.o)
+TEST_SRCS := $(wildcard test/*.c)
+
+WARNS   := -Wall -Wextra -Wno-unused-parameter
+
+ifeq ($(UNAME_S),IRIX64)
+SGUG    := /usr/sgug
+CC      := $(SGUG)/bin/gcc
+CFLAGS  := -std=c99 -O2 $(WARNS) -mabi=n32 -mabicalls \
+           -D_SGI_SOURCE -D_SGI_MP_SOURCE -D_SGI_REENTRANT_FUNCTIONS \
+           -I$(SGUG)/include -Isrc
+# Static OpenSSL keeps the binary self-contained on machines without SGUG-RSE.
+# -lz is required: SGUG builds OpenSSL with zlib. MIPSPro's ld32 dies with an
+# internal error on these archives, so GNU ld does all linking.
+LIBS    := $(SGUG)/lib32/libssl.a $(SGUG)/lib32/libcrypto.a $(SGUG)/lib32/libz.a -pthread
+LDFLAGS := -Wl,-rpath,/usr/lib32
+else
+CC      ?= gcc
+CFLAGS  := -std=c99 -O2 -g $(WARNS) -D_GNU_SOURCE -Isrc
+LIBS    := -lssl -lcrypto -pthread
+LDFLAGS :=
+endif
+
+.PHONY: all check test clean
+
+all: $(BUILD)/runner
+
+$(BUILD)/runner: $(OBJS)
+	@mkdir -p $(@D)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Portability gate. MIPSPro is compile-only; it rejects GNU C extensions, so a
+# clean run here means the source stays buildable with the stock SGI compiler.
+# The %z grep is not style policing: IRIX libc printf does not consume the
+# argument, which corrupts varargs parsing and segfaults on a following %s.
+check:
+	@! grep -rn '%[0-9.]*z[udixX]' src/ test/ \
+	  || { echo "error: %z format specifier segfaults on IRIX, see CLAUDE.md"; exit 1; }
+	@echo "ok: no %z format specifiers"
+ifeq ($(UNAME_S),IRIX64)
+	@mkdir -p $(BUILD)/mipspro
+	@for f in $(SRCS); do \
+	  echo "c99 $$f"; \
+	  PATH=/usr/bin:/bin /usr/bin/c99 -n32 -O2 -c \
+	    -o $(BUILD)/mipspro/check.o \
+	    -D_SGI_SOURCE -D_SGI_MP_SOURCE -D_SGI_REENTRANT_FUNCTIONS \
+	    -I/usr/sgug/include -Isrc $$f || exit 1; \
+	done
+	@rm -rf $(BUILD)/mipspro
+	@echo "ok: MIPSPro c99 clean"
+else
+	@echo "skip: MIPSPro check needs IRIX"
+endif
+
+test: $(BUILD)/run_tests
+	@$(BUILD)/run_tests
+
+$(BUILD)/run_tests: $(TEST_SRCS) $(LIB_OBJS)
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+clean:
+	rm -rf $(BUILD)

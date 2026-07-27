@@ -1,0 +1,14 @@
+/build/
+*.o
+*.a
+
+# Runner state, never commit these
+.runner
+.credentials
+.credentials_rsaparams
+_work/
+
+# IDE files
+.idea/
+.vscode/
+compile_commands.json
