@@ -7,6 +7,33 @@ and the two open reimplementations, so it is recorded rather than rediscovered.
 Fixture: `test/fixtures/job-message.json`, modelled field for field on a real
 captured message with synthetic values throughout.
 
+## JavaScript actions, and why there are none
+
+Decided against, July 2026, recorded so it is not relitigated.
+
+Node is not reachable. V8 dropped its MIPS backends in 2023, and Node sits on libuv,
+which has no IRIX backend and does not list IRIX even as a best-effort target. Writing
+one is weeks of work before Node itself compiles. The common intuition that small
+devices run Node does not transfer: those are Linux on little-endian MIPS or ARM, and
+the obstacles here are the OS, the byte order, and the absence of futex, `MAP_ANON` and
+working `__thread`, not the speed of the CPU.
+
+QuickJS would run. It is plain C99, needs no JIT and so no writable-executable pages, no
+futex and no libuv. The engine is perhaps two to three weeks including the big-endian
+shakeout, and a working `qjs` would be useful to SGUG on its own terms.
+
+The expensive part is the `node:` compatibility layer, roughly three months of `fs`,
+`child_process`, `stream` and `Buffer`, and even then `actions/checkout` needs forking
+because `@actions/github` pulls `undici` in at module load and wants `http`, `https`,
+`tls`, `zlib` and web streams.
+
+The payoff does not justify it for this project. The actions an IRIX CI actually needs,
+`checkout` and the artifact pair, are implemented natively in a few hundred lines each.
+`setup-node`, `setup-python` and `setup-go` are meaningless here. What JavaScript would
+buy is the long tail, and that tail assumes Linux binaries.
+
+Porting QuickJS to IRIX remains a worthwhile project. It is a separate one.
+
 ## Registration
 
 `POST https://api.github.com/actions/runner-registration`, authorised

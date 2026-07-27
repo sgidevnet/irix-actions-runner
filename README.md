@@ -47,9 +47,12 @@ Supported:
 
 Not supported, and will fail with an explicit error rather than hanging:
 
-- **JavaScript actions.** Node.js does not exist for IRIX and cannot: V8 removed its MIPS
-  backends, and big-endian MIPS was never supported even before that. Any `uses:` step
-  outside the native handler list is rejected.
+- **JavaScript actions.** Any `uses:` step outside the native handler list is rejected.
+  Node is not realistic here: V8 dropped its MIPS backends in 2023, and Node sits on
+  libuv, which has no IRIX backend and does not list IRIX even as a best-effort target.
+  QuickJS would run on IRIX, being plain C99 with no JIT, but the expensive part is a
+  `node:` compatibility layer, and the actions worth having are the ones implemented
+  natively here anyway.
 - **Container jobs and Docker actions.** There is no container runtime on IRIX.
 - **Service containers.**
 
