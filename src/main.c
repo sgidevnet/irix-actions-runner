@@ -15,7 +15,7 @@
 #include <unistd.h>
 
 static int
-usage(void)
+usage(FILE *to, int rc)
 {
 	fputs("usage: runner <command> [options]\n"
 	      "\n"
@@ -34,9 +34,10 @@ usage(void)
 	      "  remove --token TOKEN   deregister and delete local configuration\n"
 	      "  status                 show the configured runner\n"
 	      "  selftest [host]        check TLS, certificates, HTTP and clock\n"
-	      "  version                print the reported runner version\n",
-	      stderr);
-	return 2;
+	      "  version                print the version of this runner\n"
+	      "  help                   print this message\n",
+	      to);
+	return rc;
 }
 
 static const char *
@@ -453,16 +454,56 @@ out:
 	return rc;
 }
 
+/*
+ * Makes the release tarball work on a machine with no SGUG-RSE, where the
+ * compiled-in bundle path does not exist. tls.c already consults SSL_CERT_FILE,
+ * so pointing that at the shipped copy is the whole fix.
+ *
+ * Skipped when argv[0] carries no directory, since a PATH lookup would have to
+ * be repeated here to find the real one.
+ */
+static void
+adopt_adjacent_ca_bundle(const char *argv0)
+{
+	char path[512];
+	const char *slash;
+	size_t dirlen;
+
+	if (getenv("SSL_CERT_FILE") != NULL || argv0 == NULL)
+		return;
+
+	slash = strrchr(argv0, '/');
+	if (slash == NULL)
+		return;
+
+	dirlen = (size_t)(slash - argv0);
+	if (dirlen + sizeof("/cert.pem") >= sizeof(path))
+		return;
+
+	memcpy(path, argv0, dirlen);
+	sgug_snprintf(path + dirlen, sizeof(path) - dirlen, "/cert.pem");
+
+	if (access(path, R_OK) == 0)
+		setenv("SSL_CERT_FILE", path, 1);
+}
+
 int
 main(int argc, char **argv)
 {
 	if (argc < 2)
-		return usage();
+		return usage(stderr, 2);
 
-	if (strcmp(argv[1], "version") == 0) {
-		printf("%s\n", SGUG_RUNNER_VERSION);
+	adopt_adjacent_ca_bundle(argv[0]);
+
+	if (strcmp(argv[1], "version") == 0 ||
+	    strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0) {
+		printf("irix-actions-runner %s\n", SGUG_PROJECT_VERSION);
+		printf("protocol %s\n", SGUG_RUNNER_VERSION);
 		return 0;
 	}
+	if (strcmp(argv[1], "help") == 0 || strcmp(argv[1], "--help") == 0 ||
+	    strcmp(argv[1], "-h") == 0)
+		return usage(stdout, 0);
 	if (strcmp(argv[1], "selftest") == 0)
 		return selftest(argc > 2 ? argv[2] : "api.github.com");
 	if (strcmp(argv[1], "configure") == 0)
@@ -474,5 +515,6 @@ main(int argc, char **argv)
 	if (strcmp(argv[1], "status") == 0)
 		return cmd_status();
 
-	return usage();
+	fprintf(stderr, "unknown command: %s\n\n", argv[1]);
+	return usage(stderr, 2);
 }
