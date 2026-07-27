@@ -2,95 +2,101 @@
 
 A native GitHub Actions self-hosted runner for SGI IRIX 6.5.22 and later.
 
-GitHub's official runner is .NET, so it cannot run on IRIX. This is a clean-room
-reimplementation of the runner wire protocol in C99, built so a 1999 Octane can register
-as a real self-hosted runner and execute real workflow jobs.
+GitHub's official runner is .NET and cannot run on IRIX. This is a clean-room
+reimplementation of the runner wire protocol in C99. It ships as one n32 binary
+linking only `libc.so.1`, `libpthread.so` and `libm.so`, all IRIX base.
+OpenSSL is static.
 
-It ships as one self-contained n32 binary. On a stock IRIX box it needs `libc.so.1`,
-`libpthread.so` and `libm.so`, all base OS libraries. OpenSSL is linked statically.
-
-## Status
-
-Working. An Octane2 running IRIX 6.5.30m registers, appears online, runs workflow jobs and
-reports results and logs back to GitHub. Verified end to end on that hardware: a job checks
-out the repository, compiles a binary, uploads it as an artifact, and a second job
-downloads and runs it.
-
-Not yet done: live step highlighting while a job runs, and `chroot` confinement is
-implemented but only applies when the runner is started as root.
+Verified on an Octane2 running IRIX64 6.5.30m.
 
 ## Requirements
 
-- IRIX 6.5.22 or later, MIPS n32.
-- To build: [SGUG-RSE](https://github.com/sgidevnet/sgug-rse) 0.0.7beta at `/usr/sgug`,
-  for GCC 9.2 and OpenSSL 1.1.1d. Only the build needs it; the binary does not.
-- To run `actions/checkout`: `git` 2.18 or later on `PATH`.
+| | |
+|---|---|
+| OS | IRIX 6.5.22 or later, MIPS n32 |
+| Build | [SGUG-RSE](https://github.com/sgidevnet/sgug-rse) 0.0.7beta at `/usr/sgug`, for GCC 9.2 and OpenSSL 1.1.1d |
+| Runtime | nothing beyond base IRIX, plus `git` 2.18+ on `PATH` for `actions/checkout` |
 
 ## Build
 
 ```sh
-/usr/sgug/bin/sgugshell make
+/usr/sgug/bin/sgugshell make      # the shipping binary
+make check                        # MIPSPro c99 compiles every source file
+make test                         # unit tests, also runnable on Linux
 ```
 
-Cross-checking against the SGI compiler, if you have it:
+## Configure and run
 
 ```sh
-make check      # MIPSPro c99 compiles every source file
-make test       # unit tests, also runnable on Linux
+./runner configure --url https://github.com/OWNER/REPO --token <registration token> \
+                   --name octane --labels irix,mips,mips-n32
+./runner run
 ```
 
-## What works and what does not
+Registration tokens come from Settings, Actions, Runners, New self-hosted
+runner, or from `gh api -X POST repos/OWNER/REPO/actions/runners/registration-token`.
+Org runners work the same way with an org URL.
 
-Supported:
+Credentials land in `.runner`, `.credentials` and `.rsakey` beside the binary,
+mode 0600.
 
-- `run:` steps, under `bash` or `sh`, with per-step status and full logs in the UI.
-- `actions/checkout`, natively against the `git` binary.
-- `actions/upload-artifact` and `actions/download-artifact`, natively, via `zip`.
-- Job cancellation, secret masking in logs, and resource limits on every step.
+## Feature matrix
 
-Steps appear with their results and timing when a job finishes rather than lighting up as
-they run. The log content is complete either way.
+| Feature | Status |
+|---|---|
+| Registration, repo and org | yes |
+| v2 broker long poll and mid-session migration | yes |
+| `run:` steps under `bash` and `sh` | yes |
+| Per-step status and timing | yes |
+| Live step state while the job runs | yes |
+| Full job and per-step logs in the UI | yes |
+| `actions/checkout` | yes, native, against the `git` binary |
+| `actions/upload-artifact`, `actions/download-artifact` | yes, native, via `zip` |
+| Secret masking from the job's mask list | yes |
+| Job cancellation and prompt shutdown | yes |
+| Resource limits on every step | yes |
+| `chroot` and uid drop | implemented, applies only when started as root |
+| Live log tailing during a step | no |
+| JavaScript actions | no, rejected with an explicit error |
+| Container jobs, Docker actions, service containers | no |
 
-Not supported, and will fail with an explicit error rather than hanging:
+Unsupported step types fail with a named error rather than hanging.
 
-- **JavaScript actions.** Any `uses:` step outside the native handler list is rejected.
-  Node is not realistic here: V8 dropped its MIPS backends in 2023, and Node sits on
-  libuv, which has no IRIX backend and does not list IRIX even as a best-effort target.
-  QuickJS would run on IRIX, being plain C99 with no JIT, but the expensive part is a
-  `node:` compatibility layer, and the actions worth having are the ones implemented
-  natively here anyway.
-- **Container jobs and Docker actions.** There is no container runtime on IRIX.
-- **Service containers.**
-
-If your workflow needs a JavaScript action, run that step on a Linux runner and hand the
-work to IRIX in a separate job.
+JavaScript actions are not planned. V8 dropped its MIPS backends in 2023, and
+Node sits on libuv, which has no IRIX backend. QuickJS would build here, being
+C99 with no JIT, but the cost is a `node:` compatibility layer, and the actions
+worth having are the ones implemented natively above. Run JS steps on a Linux
+runner and hand the result to IRIX in a separate job.
 
 ## Runner identity
 
-The machine runs IRIX 6.5 on a big-endian MIPS R12000. The runner tells GitHub it is
-Linux on x86-64.
-
-It has to. GitHub's system labels are a fixed vocabulary with no IRIX or MIPS value, and
-ordinary workflows are written `runs-on: [self-hosted, linux, x64]`. A runner that
-described itself accurately would match nothing and never be given a job.
-
-Here is every place an identity is reported, and whether it is honest:
+The machine runs IRIX 6.5 on a big-endian MIPS R12000. The runner reports Linux
+on x86-64, because GitHub's system labels are a fixed vocabulary with no IRIX or
+MIPS value and ordinary workflows say `runs-on: [self-hosted, linux, x64]`. A
+runner describing itself accurately matches nothing.
 
 | Reported | Value sent | Accurate | Consumed by | Effect |
 |---|---|---|---|---|
-| system label | `Linux` | no, it is IRIX | `runs-on` matching | Required. Without it `runs-on: [self-hosted, linux]` never schedules here |
-| system label | `X64` | no, it is MIPS n32 | `runs-on` matching | Required for the usual `runs-on: [self-hosted, linux, x64]` |
-| user labels | `irix`, `mips`, `mips-n32`, model | yes | `runs-on` matching | Lets a workflow target this machine on purpose |
+| system label | `Linux` | no, it is IRIX | `runs-on` matching | Required |
+| system label | `X64` | no, it is MIPS n32 | `runs-on` matching | Required |
+| user labels | `irix`, `mips`, `mips-n32`, model | yes | `runs-on` matching | Deliberate targeting |
 | `osDescription` | `IRIX 6.5 mips` | yes | runner list in the UI | Display only |
-| `runnerOS`, `os=` | `Linux` | no | nothing | Not validated. A job ran reporting `IRIX` and the service neither rejected nor noticed it |
-| `RUNNER_OS` | `Linux` | no, by default | `if:` conditions in the workflow | Changes which branches a workflow takes |
+| `runnerOS`, `os=` | `Linux` | no | nothing | Not validated |
+| `RUNNER_OS` | `Linux` | no, by default | `if:` conditions | Branch selection |
 
-The labels have to stay wrong for the runner to be usable. `runnerOS` and `os=` are sent
-as `Linux` for consistency rather than necessity: nothing reads them today, and if the
-service ever starts checking, a known value is the safer thing to have been sending.
-`RUNNER_OS` is the only one you would want to change, and it is a flag.
+`runnerOS` and `os=` are sent as `Linux` for consistency, not necessity.
+`RUNNER_OS` is the only one worth changing, and it is a flag:
 
-Target the machine deliberately with the user labels:
+```sh
+SGUG_RUNNER_OS=IRIX ./runner run
+```
+
+Off by default: when `runner.os == 'Linux'` fails, third-party actions usually
+fall through to their macOS or Windows branch, which fits IRIX worse.
+
+## Examples
+
+Target the machine with the user labels.
 
 ```yaml
 jobs:
@@ -101,23 +107,9 @@ jobs:
       - run: ./configure && make
 ```
 
-Steps can be told the truth independently of the labels:
-
-```sh
-SGUG_RUNNER_OS=IRIX ./runner run
-```
-
-Off by default. When `runner.os == 'Linux'` fails, third-party actions usually fall
-through to their macOS or Windows branch, which fits IRIX worse than the Linux one.
-
-## Two ways to use it
-
-The Octane is a 400MHz R12000. Building a large package on it takes hours, while
-cross-compiling the same thing on x86 takes minutes, so the runner is most
-useful when it does the part only real hardware can.
-
-**Verify after a cross-build.** The build runs on a hosted Linux runner, the
-Octane receives the artifact and proves it actually works on IRIX.
+Cross-build on x86, verify on real hardware. A 400MHz R12000 takes hours on a
+large package where a cross-compiler takes minutes, so this shape gives the
+Octane the part only it can do.
 
 ```yaml
 jobs:
@@ -138,8 +130,8 @@ jobs:
       - run: ./run-tests.sh
 ```
 
-**Build natively.** Slower, but self-contained and closer to how SGUG-RSE
-packages are built by hand today.
+Build natively. Slower, self-contained, closer to how SGUG-RSE packages are
+built by hand today.
 
 ```yaml
 jobs:
@@ -150,48 +142,39 @@ jobs:
       - run: rpmbuild -ba package.spec --nocheck
 ```
 
-Both work. The first is what you want for a package set; the second is what you
-want for something small, or when the build itself is what you are testing.
-
-There is no IRIX emulator worth using as a substitute. QEMU has no SGI machine
-model and MAME's Indy emulation does not run 6.5 usefully, so real hardware is
-the only way to know a binary works.
+There is no IRIX emulator worth substituting for the hardware. QEMU has no SGI
+machine model and MAME's Indy emulation does not run 6.5 usefully.
 
 ## Confinement
 
-Steps run with resource limits applied between fork and exec. Measured inside a
-real job on the Octane:
+Limits are applied in the child between fork and exec. Measured inside a job on
+the Octane.
 
-| Limit | Default | Stops |
+| Limit | Default | Bounds |
 |---|---|---|
-| `RLIMIT_CPU` | 3600s | an infinite loop, which looks exactly like a long compile until this fires |
+| `RLIMIT_CPU` | 3600s | an infinite loop, indistinguishable from a long compile until this fires |
 | `RLIMIT_AS` | 1536 MB | a link step driving a 2816 MB machine into swap |
 | `RLIMIT_FSIZE` | 4096 MB | a runaway writer filling the disk |
 | `RLIMIT_NOFILE` | 512 | descriptor exhaustion |
-| `prctl(PR_MAXPROCS)` | 96 | a fork bomb. IRIX has no `RLIMIT_NPROC` |
 | `RLIMIT_CORE` | 0 | a crashing compiler dumping more than the workspace holds |
-| `prctl(PR_TERMCHILD)` | on | a backgrounded process outliving its job and holding the workspace open |
+| `prctl(PR_MAXPROCS)` | 96 | a fork bomb. IRIX has no `RLIMIT_NPROC` |
+| `prctl(PR_TERMCHILD)` | on | a backgrounded process outliving its job |
 
-This is aimed at accidents rather than adversaries. A parallel build that forks
-without bound and a test that resolves a path wrong are ordinary failures on a
-shared workstation, and each is cheap to bound.
+This bounds accidents, not adversaries. `chroot` plus an unprivileged uid plus
+rlimits is the entire toolbox IRIX provides: no namespaces, no seccomp, no
+jails, no network isolation, so a step can reach the local network.
 
-For the hostile case, use GitHub's fork pull request approval setting under
-Settings, Actions, General. A workflow from a fork should not run here
-unreviewed, and no amount of local confinement substitutes for that.
+`chroot` and the uid drop apply when the runner is started as root. Started by
+an ordinary user, the job log says so rather than implying containment that is
+not there.
 
-`chroot` and a uid drop are implemented and applied when the runner is started
-as root. Started by an ordinary user, which is the usual case, the job log says
-so rather than implying containment that is not there.
-
-What none of this stops: IRIX has no network isolation, so a step can reach the
-local network. It has no namespaces, no seccomp and no jails. `chroot` plus an
-unprivileged uid plus rlimits is the whole toolbox the OS provides.
+For untrusted input, use GitHub's fork pull request approval setting under
+Settings, Actions, General. No local confinement substitutes for it.
 
 ## Why
 
-SGUG-RSE has no way to build and test packages on the hardware it targets. Every surviving
-SGI machine is locked out of modern CI. This fixes that.
+SGUG-RSE has no way to build and test packages on the hardware it targets.
+Every surviving SGI machine is locked out of modern CI.
 
 ## License
 

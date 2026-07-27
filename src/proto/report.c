@@ -259,16 +259,12 @@ emit_record(sgug_jsonw *w, const char *id, const char *parent, const char *type,
 	sgug_jsonw_obj_end(w);
 }
 
-/*
- * Pushes the current state of every step to the results service, which is what
- * makes them light up as the job runs. Without it the UI shows nothing until
- * completejob lands and every step appears at once.
- */
+/* Live step state. Without it the UI shows nothing until completejob lands. */
 static void
 push_steps(sgug_reporter *r)
 {
 	sgug_step_state states[SGUG_JOB_MAX_STEPS];
-	char err[256];
+	char err[512];
 	size_t i;
 
 	if (r->results == NULL || r->job->nsteps == 0)
@@ -296,16 +292,7 @@ push_steps(sgug_reporter *r)
 		}
 	}
 
-	/*
-	 * Best effort, and disabled after the first refusal.
-	 *
-	 * This service rejects the plan id as workflow_run_backend_id with
-	 * "workflow run not found", even though the receiver service accepts
-	 * the same value for log uploads, so the identifier it wants is
-	 * something else. Live step state is cosmetic: completejob still
-	 * carries accurate per-step results and timestamps, so a failure here
-	 * costs the running highlight and nothing else.
-	 */
+	/* Best effort; completejob carries the authoritative step results. */
 	if (r->steps_update_broken)
 		return;
 

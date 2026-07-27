@@ -109,31 +109,34 @@ sgug_results_timestamp(sgug_time_t t, char *out, size_t outlen)
 	sgug_snprintf(out, outlen, "%s", full);
 }
 
-static const char *
-status_name(sgug_step_status s)
+/*
+ * Enum numbers, not names. A name fails the service's decoder, which then
+ * zeroes the request and answers 404 on the run id. Values are non-sequential.
+ */
+static int
+status_value(sgug_step_status s)
 {
 	switch (s) {
-	case SGUG_STEP_RUNNING: return "STATUS_IN_PROGRESS";
-	case SGUG_STEP_DONE: return "STATUS_COMPLETED";
-	default: return "STATUS_PENDING";
+	case SGUG_STEP_RUNNING: return 3;
+	case SGUG_STEP_DONE: return 6;
+	default: return 5;
 	}
 }
 
-/* Protobuf enum names, which is how Twirp JSON encodes them. */
-static const char *
-conclusion_name(const char *result)
+static int
+conclusion_value(const char *result)
 {
 	if (result == NULL)
-		return "CONCLUSION_UNKNOWN";
+		return 0;
 	if (strcmp(result, "succeeded") == 0)
-		return "CONCLUSION_SUCCESS";
+		return 2;
 	if (strcmp(result, "failed") == 0)
-		return "CONCLUSION_FAILURE";
+		return 3;
 	if (strcmp(result, "canceled") == 0)
-		return "CONCLUSION_CANCELLED";
+		return 4;
 	if (strcmp(result, "skipped") == 0)
-		return "CONCLUSION_SKIPPED";
-	return "CONCLUSION_UNKNOWN";
+		return 7;
+	return 0;
 }
 
 static int
@@ -178,10 +181,10 @@ sgug_results_steps_update(sgug_results *r, const sgug_step_state *steps,
 		sgug_jsonw_key(w, "name");
 		sgug_jsonw_str(w, st->name);
 		sgug_jsonw_key(w, "status");
-		sgug_jsonw_str(w, status_name(st->status));
+		sgug_jsonw_int(w, status_value(st->status));
 		sgug_jsonw_key(w, "conclusion");
-		sgug_jsonw_str(w, st->status == SGUG_STEP_DONE
-		    ? conclusion_name(st->conclusion) : "CONCLUSION_UNKNOWN");
+		sgug_jsonw_int(w, st->status == SGUG_STEP_DONE
+		    ? conclusion_value(st->conclusion) : 0);
 		if (st->started_at != NULL && st->started_at[0] != '\0') {
 			sgug_jsonw_key(w, "started_at");
 			sgug_jsonw_str(w, st->started_at);
@@ -229,7 +232,7 @@ twirp_at(sgug_results *r, const char *svc, const char *method,
 	}
 
 	if (sgug_http_status(resp) >= 300) {
-		seterr(err, errlen, "%s returned %d: %.180s", method,
+		seterr(err, errlen, "%s returned %d: %.400s", method,
 		    sgug_http_status(resp), sgug_http_body(resp, NULL));
 		sgug_http_resp_free(resp);
 		return -1;
