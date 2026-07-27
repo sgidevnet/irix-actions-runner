@@ -77,6 +77,23 @@ produces runtime crashes, not compile errors.
   ignores, so a null check compiles to constant true). We use `gethostbyname` and IPv4
   only.
 
+## Clock skew
+
+GitHub's `Date` response header is a coarse skew reference. Two independently
+NTP-disciplined machines, the Linux dev host and the Octane, both measure themselves
+7 seconds ahead of it, so the offset is server side and not a local error.
+
+Consequently the skew correction must only engage past a threshold of roughly a minute.
+Applying every measured offset would inject a spurious 7 second correction on a machine
+whose clock is already right. The threshold is safe because the value being protected is
+a five minute JWT window with `nbf` already backdated 30 seconds.
+
+The Octane itself is disciplined by `ntpd` as of 2026-07-26; before that it ran `timed`,
+a BSD LAN daemon that syncs to peers rather than to an upstream source, and sat 95
+minutes slow. Its RTC measures under 1 ppm, so the machine needed a time source, not
+drift compensation. Other vintage machines will not all be this lucky, which is why the
+correction exists at all.
+
 ## Protocol
 
 github.com pushes runners onto the v2 broker flow. A runner that implements only the
