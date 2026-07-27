@@ -1,29 +1,220 @@
 #include "compat/irix.h"
 #include "json/json.h"
 #include "net/http.h"
+#include "proto/config.h"
+#include "proto/register.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/*
- * Reported to the Actions service at registration. The service enforces a
- * minimum and refuses an older runner, so this tracks GitHub's current release
- * rather than our own progress. Bump when the floor rises.
- */
-#define RUNNER_VERSION "2.336.0"
-
-#define USER_AGENT "irix-actions-runner/" RUNNER_VERSION " (IRIX; mips)"
+#include <unistd.h>
 
 static int
 usage(void)
 {
-	fputs("usage: runner <command>\n"
+	fputs("usage: runner <command> [options]\n"
 	      "\n"
-	      "  selftest [host]   check TLS, certificates, HTTP and clock\n"
-	      "  version           print the reported runner version\n",
+	      "  configure --url URL --token TOKEN [options]\n"
+	      "      --url URL          https://github.com/org or .../org/repo\n"
+	      "      --token TOKEN      registration token, from the UI or API\n"
+	      "      --name NAME        runner name, default the hostname\n"
+	      "      --runnergroup NAME runner group, default Default\n"
+	      "      --labels A,B,C     extra labels beyond irix,mips,mips-n32\n"
+	      "      --work DIR         work folder, default _work\n"
+	      "      --replace          take over an existing runner of this name\n"
+	      "\n"
+	      "  remove --token TOKEN   deregister and delete local configuration\n"
+	      "  status                 show the configured runner\n"
+	      "  selftest [host]        check TLS, certificates, HTTP and clock\n"
+	      "  version                print the reported runner version\n",
 	      stderr);
 	return 2;
+}
+
+static const char *
+arg_after(int argc, char **argv, int *i, const char *what)
+{
+	if (*i + 1 >= argc) {
+		fprintf(stderr, "%s needs a value\n", what);
+		exit(2);
+	}
+	(*i)++;
+	return argv[*i];
+}
+
+/* Splits "a,b,c" in place. Returns the count. */
+static size_t
+split_labels(char *s, const char **out, size_t max)
+{
+	size_t n = 0;
+
+	while (*s != '\0' && n < max) {
+		char *comma = strchr(s, ',');
+
+		if (comma != NULL)
+			*comma = '\0';
+		if (*s != '\0')
+			out[n++] = s;
+		if (comma == NULL)
+			break;
+		s = comma + 1;
+	}
+	return n;
+}
+
+static int
+cmd_configure(int argc, char **argv)
+{
+	sgug_register_opts opts;
+	sgug_config cfg;
+	sgug_http_client *http;
+	char hostname[128];
+	char err[512];
+	const char *labels[32];
+	size_t nlabels = 0;
+	int i, rc;
+
+	memset(&opts, 0, sizeof(opts));
+	opts.work_folder = "_work";
+
+	/* Always present, so a workflow can target this machine on purpose
+	 * rather than relying on the system labels, which claim X64. */
+	labels[nlabels++] = "irix";
+	labels[nlabels++] = "mips";
+	labels[nlabels++] = "mips-n32";
+
+	for (i = 2; i < argc; i++) {
+		if (strcmp(argv[i], "--url") == 0)
+			opts.github_url = arg_after(argc, argv, &i, "--url");
+		else if (strcmp(argv[i], "--token") == 0)
+			opts.reg_token = arg_after(argc, argv, &i, "--token");
+		else if (strcmp(argv[i], "--name") == 0)
+			opts.runner_name = arg_after(argc, argv, &i, "--name");
+		else if (strcmp(argv[i], "--runnergroup") == 0)
+			opts.runner_group = arg_after(argc, argv, &i, "--runnergroup");
+		else if (strcmp(argv[i], "--work") == 0)
+			opts.work_folder = arg_after(argc, argv, &i, "--work");
+		else if (strcmp(argv[i], "--replace") == 0)
+			opts.replace = 1;
+		else if (strcmp(argv[i], "--labels") == 0) {
+			char *v = (char *)arg_after(argc, argv, &i, "--labels");
+
+			nlabels += split_labels(v, labels + nlabels,
+			    sizeof(labels) / sizeof(labels[0]) - nlabels);
+		} else {
+			fprintf(stderr, "unknown option %s\n", argv[i]);
+			return 2;
+		}
+	}
+
+	if (opts.github_url == NULL || opts.reg_token == NULL) {
+		fprintf(stderr, "--url and --token are required\n");
+		return 2;
+	}
+
+	if (opts.runner_name == NULL) {
+		if (gethostname(hostname, sizeof(hostname)) != 0)
+			sgug_snprintf(hostname, sizeof(hostname), "irix-runner");
+		hostname[sizeof(hostname) - 1] = '\0';
+		opts.runner_name = hostname;
+	}
+
+	opts.labels = labels;
+	opts.nlabels = nlabels;
+
+	if (sgug_config_exists(".") && !opts.replace) {
+		fprintf(stderr, "this directory already holds a configured "
+		    "runner; remove it first or pass --replace\n");
+		return 1;
+	}
+
+	http = sgug_http_client_new(NULL, SGUG_USER_AGENT);
+	if (http == NULL) {
+		fprintf(stderr, "http client: %s\n", sgug_http_last_error());
+		return 1;
+	}
+
+	err[0] = '\0';
+	rc = sgug_register(http, &opts, ".", &cfg, err, sizeof(err));
+	if (rc != 0) {
+		fprintf(stderr, "registration failed: %s\n", err);
+		sgug_http_client_free(http);
+		return 1;
+	}
+
+	printf("runner    %s\n", cfg.agent_name);
+	printf("group     %s (pool %ld)\n", cfg.pool_name, (long)cfg.pool_id);
+	printf("agent id  %ld\n", (long)cfg.agent_id);
+	printf("flow      %s\n", cfg.use_v2_flow ? "v2 broker" : "v1 pool");
+	printf("signing   %s\n", cfg.require_fips ? "PS256" : "RS256");
+	printf("\nconfigured. run `runner run` to start listening.\n");
+
+	sgug_http_client_free(http);
+	return 0;
+}
+
+static int
+cmd_remove(int argc, char **argv)
+{
+	sgug_http_client *http;
+	const char *token = NULL;
+	char err[512];
+	int i, rc;
+
+	for (i = 2; i < argc; i++) {
+		if (strcmp(argv[i], "--token") == 0)
+			token = arg_after(argc, argv, &i, "--token");
+		else {
+			fprintf(stderr, "unknown option %s\n", argv[i]);
+			return 2;
+		}
+	}
+
+	if (token == NULL) {
+		fprintf(stderr, "--token is required; the OAuth credentials "
+		    "cannot authorise their own deletion\n");
+		return 2;
+	}
+
+	http = sgug_http_client_new(NULL, SGUG_USER_AGENT);
+	if (http == NULL) {
+		fprintf(stderr, "http client: %s\n", sgug_http_last_error());
+		return 1;
+	}
+
+	err[0] = '\0';
+	rc = sgug_unregister(http, ".", token, err, sizeof(err));
+	if (rc != 0)
+		fprintf(stderr, "removal failed: %s\n", err);
+	else
+		printf("runner removed\n");
+
+	sgug_http_client_free(http);
+	return rc == 0 ? 0 : 1;
+}
+
+static int
+cmd_status(void)
+{
+	sgug_config cfg;
+
+	if (sgug_config_load(&cfg, ".") != 0) {
+		fprintf(stderr, "no runner configured in this directory\n");
+		return 1;
+	}
+
+	printf("runner    %s\n", cfg.agent_name);
+	printf("url       %s\n", cfg.github_url);
+	printf("group     %s (pool %ld)\n", cfg.pool_name, (long)cfg.pool_id);
+	printf("agent id  %ld\n", (long)cfg.agent_id);
+	printf("tenant    %s\n", cfg.server_url);
+	printf("flow      %s\n", cfg.use_v2_flow ? "v2 broker" : "v1 pool");
+	if (cfg.server_url_v2[0] != '\0')
+		printf("broker    %s\n", cfg.server_url_v2);
+	printf("signing   %s\n", cfg.require_fips ? "PS256" : "RS256");
+	printf("work      %s\n", cfg.work_folder);
+	return 0;
 }
 
 /*
@@ -46,7 +237,7 @@ selftest(const char *host)
 
 	printf("host      %s\n", host);
 
-	c = sgug_http_client_new(NULL, USER_AGENT);
+	c = sgug_http_client_new(NULL, SGUG_USER_AGENT);
 	if (c == NULL) {
 		fprintf(stderr, "client: %s\n", sgug_http_last_error());
 		return 1;
@@ -80,24 +271,15 @@ selftest(const char *host)
 		printf("          will compensate, but enable NTP on this machine\n");
 	}
 
-	/* Parsing the response proves the JSON layer works against real service
-	 * output rather than only against fixtures. */
 	doc = sgug_json_parse(body, body_len, NULL, 0);
 	if (doc != NULL) {
-		const sgug_json *root = sgug_json_root(doc);
-
 		printf("json      parsed, %lu top-level keys\n",
-		    (unsigned long)sgug_json_len(root));
+		    (unsigned long)sgug_json_len(sgug_json_root(doc)));
 		sgug_json_free(doc);
 	} else if (body_len > 0) {
 		printf("json      response was not JSON, which is fine here\n");
 	}
 
-	/*
-	 * A second request on the same client must reuse the connection.
-	 * Handshakes cost tens of milliseconds on this hardware and the
-	 * listener reconnects every 50 seconds for as long as it runs.
-	 */
 	sgug_http_resp_free(r);
 	r = NULL;
 	if (sgug_http_request(c, "GET", url, NULL, 0, NULL, 0, 30000, &r) != 0) {
@@ -122,11 +304,17 @@ main(int argc, char **argv)
 		return usage();
 
 	if (strcmp(argv[1], "version") == 0) {
-		printf("%s\n", RUNNER_VERSION);
+		printf("%s\n", SGUG_RUNNER_VERSION);
 		return 0;
 	}
 	if (strcmp(argv[1], "selftest") == 0)
 		return selftest(argc > 2 ? argv[2] : "api.github.com");
+	if (strcmp(argv[1], "configure") == 0)
+		return cmd_configure(argc, argv);
+	if (strcmp(argv[1], "remove") == 0)
+		return cmd_remove(argc, argv);
+	if (strcmp(argv[1], "status") == 0)
+		return cmd_status();
 
 	return usage();
 }
