@@ -295,12 +295,7 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 			status = h(&job, st, &sopts, on_line, &rc, steperr,
 			    sizeof(steperr));
 		} else if (st->kind != SGUG_STEP_SCRIPT) {
-			char msg[256];
-
-			sgug_snprintf(msg, sizeof(msg),
-			    "container and docker steps cannot run on IRIX: "
-			    "there is no container runtime");
-			on_line(&rc, msg);
+			on_line(&rc, st->unsupported_reason);
 			sgug_report_step_finished(rep, i, SGUG_RESULT_FAILED);
 			failed = 1;
 			continue;

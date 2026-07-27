@@ -432,6 +432,29 @@ JSON rather than tagged objects:
 A parser needs both `type`/`lit`/`map`/`Key`/`Value` and `t`/`s`/`d`/`k`/`v`.
 The reference documentation describes only the compact form.
 
+### Expressions arrive unevaluated
+
+`${{ }}` is not resolved by the service. A scalar that is entirely one
+expression becomes a `type: 3` BasicExpression token carrying `expr`; an
+interpolated scalar becomes the same thing wrapped in a `format()` call over the
+literal parts, so `run: echo ${{ github.sha }}` arrives as
+
+```json
+{"type": 3, "expr": "format('echo {0}', github.sha)"}
+```
+
+`if:` corroborates this: the condition arrives as the raw string `"success()"`,
+not as a boolean, so the service defers evaluation of both.
+
+A type 3 token carries no `lit`, so a reader that only understands literals
+returns its fallback, which is indistinguishable from an absent key. For a
+step's `script` that yielded an empty body, and an empty body was treated as a
+no-op and reported as succeeded. The runner now rejects the step instead. The
+contexts the message does carry are `github`, `inputs`, `job`, `matrix`,
+`needs`, `strategy` and `vars`, plus a top-level `environmentVariables` holding
+the workflow and job `env:` blocks; `runner` arrives null and is synthesised
+locally.
+
 | Field | Value | Reference says |
 |---|---|---|
 | `plan.planType` | `"actions"` | `"Build"` |

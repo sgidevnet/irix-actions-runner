@@ -83,23 +83,36 @@ parse_step(sgug_step *st, const sgug_json *s)
 		 * compact spelling it comes back empty and the step runs
 		 * nothing at all, silently.
 		 */
-		st->script = sgug_token_map_str(inputs, "script", "");
-		v = sgug_token_map_get(inputs, "shell");
-		if (v != NULL)
-			st->shell = sgug_token_str(v, NULL);
-		v = sgug_token_map_get(inputs, "workingDirectory");
-		if (v != NULL)
-			st->working_directory = sgug_token_str(v, NULL);
+		v = sgug_token_map_get(inputs, "script");
+		if (v != NULL && !sgug_token_is_literal(v)) {
+			/* Without this the script reads as empty and the step
+			 * is reported as having succeeded without running. */
+			st->kind = SGUG_STEP_UNSUPPORTED;
+			st->unsupported_reason =
+			    "this step's script is a ${{ }} expression, and "
+			    "this runner has no expression evaluator yet. Use "
+			    "the $GITHUB_* shell variables instead, or run the "
+			    "step on a hosted runner. See docs/protocol.md.";
+		} else {
+			st->script = sgug_token_str(v, "");
+			v = sgug_token_map_get(inputs, "shell");
+			if (v != NULL)
+				st->shell = sgug_token_str(v, NULL);
+			v = sgug_token_map_get(inputs, "workingDirectory");
+			if (v != NULL)
+				st->working_directory = sgug_token_str(v, NULL);
+		}
 	} else if (strcmp(reftype, "repository") == 0) {
 		st->kind = SGUG_STEP_ACTION;
 		st->action_name = sgug_json_string(sgug_json_get(ref, "name"), "");
 		st->action_ref = sgug_json_string(sgug_json_get(ref, "ref"), "");
 		st->inputs = inputs;
 	} else {
-		/* containerRegistry and docker: no container runtime exists on
-		 * IRIX, so these are rejected rather than attempted. */
 		st->kind = SGUG_STEP_UNSUPPORTED;
 		st->action_name = reftype;
+		st->unsupported_reason =
+		    "container and docker steps cannot run on IRIX: there is "
+		    "no container runtime";
 	}
 
 	/*

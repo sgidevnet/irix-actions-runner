@@ -101,6 +101,51 @@ test_token_forms(void)
 	sgug_json_free(b);
 }
 
+/*
+ * The service compiles a `run:` body containing ${{ }} into a type 3
+ * BasicExpression, and an interpolated one into a format() call over the
+ * literal parts. Neither carries a `lit`, so reading it as a scalar yields the
+ * fallback. That must not look like an absent key: an empty script is treated
+ * as a no-op and the step is reported as having succeeded without running.
+ */
+static void
+test_expression_script_is_rejected(void)
+{
+	static const char *WHOLE =
+	    "{\"type\":2,\"map\":[{\"Key\":{\"type\":0,\"lit\":\"script\"},"
+	    "\"Value\":{\"type\":3,\"expr\":\"github.sha\"}}]}";
+	static const char *INTERPOLATED =
+	    "{\"type\":2,\"map\":[{\"Key\":{\"type\":0,\"lit\":\"script\"},"
+	    "\"Value\":{\"type\":3,"
+	    "\"expr\":\"format('echo {0}', github.sha)\"}}]}";
+	static const char *LITERAL =
+	    "{\"type\":2,\"map\":[{\"Key\":{\"type\":0,\"lit\":\"script\"},"
+	    "\"Value\":{\"type\":0,\"lit\":\"echo hi\"}}]}";
+	sgug_json_doc *a = sgug_json_parse(WHOLE, strlen(WHOLE), NULL, 0);
+	sgug_json_doc *b = sgug_json_parse(INTERPOLATED, strlen(INTERPOLATED),
+	    NULL, 0);
+	sgug_json_doc *c = sgug_json_parse(LITERAL, strlen(LITERAL), NULL, 0);
+
+	CHECK(a != NULL && b != NULL && c != NULL);
+	if (a == NULL || b == NULL || c == NULL)
+		return;
+
+	CHECK(!sgug_token_is_literal(
+	    sgug_token_map_get(sgug_json_root(a), "script")));
+	CHECK(!sgug_token_is_literal(
+	    sgug_token_map_get(sgug_json_root(b), "script")));
+	CHECK(sgug_token_is_literal(
+	    sgug_token_map_get(sgug_json_root(c), "script")));
+
+	/* An absent key is a third case, and is not an expression. */
+	CHECK(!sgug_token_is_literal(
+	    sgug_token_map_get(sgug_json_root(c), "absent")));
+
+	sgug_json_free(a);
+	sgug_json_free(b);
+	sgug_json_free(c);
+}
+
 static void
 test_parse_fixture(void)
 {
@@ -195,6 +240,7 @@ int
 main(void)
 {
 	test_token_forms();
+	test_expression_script_is_rejected();
 	test_parse_fixture();
 	test_rejects_incomplete();
 
