@@ -58,7 +58,7 @@ struct sgug_reporter {
 
 	/* NULL on deployments that still use the timeline API. */
 	sgug_results *results;
-	int steps_update_broken;
+	int steps_update_failures;
 
 	char err[512];
 };
@@ -292,15 +292,21 @@ push_steps(sgug_reporter *r)
 		}
 	}
 
-	/* Best effort; completejob carries the authoritative step results. */
-	if (r->steps_update_broken)
-		return;
-
+	/*
+	 * Keep pushing after a failure. The first update of a job can land
+	 * before the run is visible to this service, and the official runner
+	 * never gives up either in results-service-only mode. Best effort
+	 * regardless: completejob carries the authoritative step results.
+	 */
 	err[0] = '\0';
 	if (sgug_results_steps_update(r->results, states, r->job->nsteps, err,
 	    sizeof(err)) != 0) {
-		fprintf(stderr, "live step updates unavailable: %s\n", err);
-		r->steps_update_broken = 1;
+		if (r->steps_update_failures++ == 0)
+			fprintf(stderr, "live step update refused: %s\n", err);
+	} else if (r->steps_update_failures > 0) {
+		fprintf(stderr, "live step updates accepted, %d refused\n",
+		    r->steps_update_failures);
+		r->steps_update_failures = 0;
 	}
 }
 

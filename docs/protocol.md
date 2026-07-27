@@ -352,6 +352,11 @@ zeroes the request and answers
 
 The message names the run id. The run id is fine.
 
+The same 404 also appears legitimately on the **first** update of a job, before
+the run is visible to this service. It clears by the next transition, so do not
+disable the client on it. The official runner only gives up in the
+non-results-service-only branch, which broker-delivered jobs never take.
+
 ### `POST .../ArtifactService/CreateArtifact`
 
 ```json
