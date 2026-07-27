@@ -3,6 +3,7 @@
 #include "crypto/b64.h"
 #include "json/json.h"
 #include "proto/config.h"
+#include "proto/results.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,9 @@ struct sgug_reporter {
 	 * 404. Detected by the presence of ResultsServiceUrl in the job.
 	 */
 	int legacy_timeline;
+
+	/* NULL on deployments that still use the timeline API. */
+	sgug_results *results;
 
 	char err[512];
 };
@@ -116,6 +120,7 @@ sgug_report_new(sgug_http_client *http, const sgug_job *job)
 
 	r->legacy_timeline = job->results_url == NULL ||
 	    job->results_url[0] == '\0';
+	r->results = sgug_results_new(http, job);
 
 	for (i = 0; i < job->nsteps; i++)
 		derive_record_id(job->steps[i].id, r->steps[i].record_id,
@@ -134,6 +139,8 @@ sgug_report_free(sgug_reporter *r)
 
 	if (r == NULL)
 		return;
+
+	sgug_results_free(r->results);
 
 	for (i = 0; i < SGUG_JOB_MAX_STEPS; i++) {
 		free(r->steps[i].log);
@@ -611,7 +618,16 @@ sgug_report_step_finished(sgug_reporter *r, size_t i, sgug_result result)
 
 	sgug_report_flush(r);
 
-	if (st->log_len > 0) {
+	if (st->log_len > 0 && r->results != NULL) {
+		char uerr[256];
+
+		uerr[0] = '\0';
+		if (sgug_results_step_log(r->results, st->record_id, st->log,
+		    st->log_len, st->log_lines, uerr, sizeof(uerr)) != 0)
+			fprintf(stderr, "log upload: %s\n", uerr);
+	}
+
+	if (st->log_len > 0 && r->legacy_timeline) {
 		st->log_id = create_log(r);
 		if (st->log_id > 0) {
 			char idbuf[24];
@@ -667,6 +683,45 @@ sgug_report_job_finished(sgug_reporter *r, sgug_result result)
 	end_records(w);
 	rc = patch_records(r, w, 1);
 	sgug_jsonw_free(w);
+
+	/*
+	 * The job log is the concatenation of the step logs, uploaded
+	 * separately from them. The steps drive what each section shows when
+	 * expanded; this is what the download button and the REST logs endpoint
+	 * serve, and without it that endpoint answers BlobNotFound even though
+	 * the steps look complete.
+	 */
+	if (r->results != NULL) {
+		char *joblog = NULL;
+		size_t total = 0, off = 0;
+		int64_t lines = 0;
+
+		for (i = 0; i < r->job->nsteps; i++) {
+			total += r->steps[i].log_len;
+			lines += r->steps[i].log_lines;
+		}
+
+		if (total > 0)
+			joblog = malloc(total + 1);
+		if (joblog != NULL) {
+			char uerr[256];
+
+			for (i = 0; i < r->job->nsteps; i++) {
+				if (r->steps[i].log_len == 0)
+					continue;
+				memcpy(joblog + off, r->steps[i].log,
+				    r->steps[i].log_len);
+				off += r->steps[i].log_len;
+			}
+			joblog[off] = '\0';
+
+			uerr[0] = '\0';
+			if (sgug_results_job_log(r->results, joblog, off, lines,
+			    uerr, sizeof(uerr)) != 0)
+				fprintf(stderr, "job log upload: %s\n", uerr);
+			free(joblog);
+		}
+	}
 
 	/*
 	 * Completion goes to the run service, not the plan events route.
