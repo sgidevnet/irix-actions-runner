@@ -153,6 +153,64 @@ Other differences from the reference:
   locally.
 - `messageType` on the acquired message stays `RunnerJobRequest`.
 
+### Reporting: the timeline API is gone
+
+This is the single biggest divergence from the reference material, and it is
+invisible until nothing appears in the UI.
+
+**Modern github.com does not serve the Azure DevOps timeline API for these
+plans.** Extracting the UTF-16 string heap from the official runner v2.336.0
+assemblies finds **no `_apis/distributedtask` routes at all**. Every
+`PATCH .../timelines/{id}/records`, `POST .../logs` and `POST .../events` call
+returns 404, silently, while steps run perfectly well locally.
+
+What the runner actually uses:
+
+| Surface | Base | Verbs |
+|---|---|---|
+| Run service | `resources.endpoints[0].url` | `session`, `message`, `acquirejob`, `renewjob`, `completejob`, `acknowledge` |
+| Results service | `data.ResultsServiceUrl` | Twirp, see below |
+
+Job and per-step state is carried in the `completejob` payload, not by the
+timeline:
+
+```
+POST {run_service_url}completejob
+{"planId":..., "jobId":..., "conclusion":"succeeded",
+ "stepResults":[{"external_id":..., "number":1, "name":..., "status":"completed",
+                 "conclusion":"succeeded", "started_at":..., "completed_at":...,
+                 "completed_log_url":null, "completed_log_lines":42,
+                 "annotations":[]}],
+ "annotations":[], "environmentUrl":null, "billingOwnerId":...}
+```
+
+Sending this is what makes the job go green and what releases the parallelism
+slot. Without it the job runs, succeeds locally, and stays "in progress"
+forever.
+
+The run service takes no api-version.
+
+### Results service, for logs
+
+Twirp over JSON. Two services, from the runner's string heap:
+
+```
+twirp/results.services.receiver.Receiver/
+twirp/github.actions.results.api.v1.WorkflowStepUpdateService/
+```
+
+Log upload is a three-step dance per step:
+
+1. `GetStepLogsSignedBlobURL` returns a signed Azure blob URL
+2. `PUT` the log bytes to that URL
+3. `CreateStepLogsMetadata` registers the upload against the step
+
+The same pair exists for whole-job logs, `GetJobLogsSignedBlobURL` and
+`CreateJobLogsMetadata`, and for step summaries.
+
+Until this is implemented, steps appear in the UI with the right names and
+results but cannot be expanded, because there is no log to show.
+
 ### Reporting endpoints
 
 `resources.endpoints[0]` is `SystemVssConnection`. Its

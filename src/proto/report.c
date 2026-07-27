@@ -46,6 +46,15 @@ struct sgug_reporter {
 
 	struct step_state steps[SGUG_JOB_MAX_STEPS];
 
+	/*
+	 * True when this deployment still serves the Azure DevOps timeline and
+	 * log APIs. Modern github.com does not: the official runner v2.336.0
+	 * contains no _apis/distributedtask routes at all, only run-service
+	 * verbs and a Twirp results service, and every timeline call returns
+	 * 404. Detected by the presence of ResultsServiceUrl in the job.
+	 */
+	int legacy_timeline;
+
 	char err[512];
 };
 
@@ -104,6 +113,9 @@ sgug_report_new(sgug_http_client *http, const sgug_job *job)
 	    "%s_apis/distributedtask/hubs/%s/plans/%s",
 	    job->pipelines_url[0] != '\0' ? job->pipelines_url : job->service_url,
 	    job->plan_type, job->plan_id);
+
+	r->legacy_timeline = job->results_url == NULL ||
+	    job->results_url[0] == '\0';
 
 	for (i = 0; i < job->nsteps; i++)
 		derive_record_id(job->steps[i].id, r->steps[i].record_id,
@@ -247,6 +259,9 @@ patch_records(sgug_reporter *r, sgug_jsonw *w, int count)
 	char ctype[128];
 	const char *body;
 	size_t len;
+
+	if (!r->legacy_timeline)
+		return 0;
 
 	body = sgug_jsonw_done(w, &len);
 	if (body == NULL) {
@@ -452,6 +467,20 @@ sgug_report_flush(sgug_reporter *r)
 	size_t i, j;
 	int rc = 0;
 
+	if (!r->legacy_timeline) {
+		/* Drop what we buffered; the console feed lives on the results
+		 * service, which is not implemented yet. */
+		for (i = 0; i < r->job->nsteps; i++) {
+			struct step_state *st = &r->steps[i];
+
+			for (j = 0; j < st->nfeed; j++)
+				free(st->feed[j]);
+			st->lines_sent += (int64_t)st->nfeed;
+			st->nfeed = 0;
+		}
+		return 0;
+	}
+
 	for (i = 0; i < r->job->nsteps; i++) {
 		struct step_state *st = &r->steps[i];
 		sgug_jsonw *w;
@@ -522,6 +551,11 @@ create_log(sgug_reporter *r)
 
 	if (w == NULL)
 		return -1;
+
+	if (!r->legacy_timeline) {
+		sgug_jsonw_free(w);
+		return -1;
+	}
 
 	sgug_format_iso8601(sgug_now(), now, sizeof(now));
 	sgug_snprintf(path, sizeof(path), "logs/%s", r->job->job_id);
