@@ -80,4 +80,21 @@ int sgug_results_steps_update(sgug_results *r, const sgug_step_state *steps,
  */
 void sgug_results_timestamp(sgug_time_t t, char *out, size_t outlen);
 
+/*
+ * Artifacts, on a second Twirp service at the same base:
+ *
+ *   twirp/github.actions.results.api.v1.ArtifactService/
+ *
+ * Upload is create, PUT the zip to the signed URL, finalize with the size and
+ * a sha256. Download is get a signed URL and fetch it. The zip itself is built
+ * and unpacked with the zip and unzip binaries, the same way checkout uses
+ * git, since artifacts v4 are ordinary zip archives.
+ */
+int sgug_artifact_upload(sgug_results *r, const char *name,
+    const char *zip_path, char *err, size_t errlen);
+
+/* Writes the artifact zip to zip_path. */
+int sgug_artifact_download(sgug_results *r, const char *name,
+    const char *zip_path, char *err, size_t errlen);
+
 #endif /* SGUG_PROTO_RESULTS_H */

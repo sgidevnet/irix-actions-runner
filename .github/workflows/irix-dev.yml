@@ -6,30 +6,45 @@ name: irix-dev
 # the runner cannot collide with whatever is registered in the org IRIX group.
 # irix.yml keeps the realistic `runs-on: [self-hosted, irix]`.
 #
-# Delete this once job execution is stable.
+# Delete this once the handlers are stable.
 
 on:
   workflow_dispatch:
 
 jobs:
-  smoke:
+  build:
     runs-on: [self-hosted, octane-t1]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
-      - name: Confirm the checkout
-        run: |
-          pwd
-          git log --oneline -1
-          ls README.md Makefile
-
-      - name: Identify the machine
+      - name: Build something small
         run: |
           uname -a
-          hinv | head -3
+          mkdir -p out
+          gcc -O2 -o out/hello - <<'EOF'
+          #include <stdio.h>
+          int main(void){ printf("built on IRIX\n"); return 0; }
+          EOF
+          ./out/hello
+          file out/hello
 
-      - name: Check the toolchain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hello-irix
+          path: out
+
+  verify:
+    needs: build
+    runs-on: [self-hosted, octane-t1]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hello-irix
+
+      - name: Run what the other job built
         run: |
-          echo "PATH=$PATH"
-          /usr/sgug/bin/gcc --version | head -1
+          ls -la out
+          chmod +x out/hello
+          ./out/hello

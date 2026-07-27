@@ -2,6 +2,10 @@
 
 #include "crypto/b64.h"
 #include "exec/token.h"
+#include "net/http.h"
+#include "proto/results.h"
+
+#include "version.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -232,11 +236,171 @@ fail:
 	return rc != 0 ? rc : -1;
 }
 
+/*
+ * A results client for the artifact handlers.
+ *
+ * Built per call rather than shared: a handler receives the job but not the
+ * reporter that owns the long-lived one, and an artifact operation is rare
+ * enough that the extra setup is irrelevant next to the transfer.
+ */
+static sgug_results *
+results_for(const sgug_job *job, sgug_http_client **http_out)
+{
+	sgug_http_client *http = sgug_http_client_new(NULL, SGUG_USER_AGENT);
+	sgug_results *r;
+
+	if (http == NULL)
+		return NULL;
+
+	r = sgug_results_new(http, job);
+	if (r == NULL) {
+		sgug_http_client_free(http);
+		return NULL;
+	}
+	*http_out = http;
+	return r;
+}
+
+/*
+ * actions/upload-artifact.
+ *
+ * Artifacts v4 are zip archives, so this builds one with the zip binary the
+ * same way checkout drives git, then does the three call upload: create, PUT
+ * to the signed URL, finalize with the size and a sha256.
+ *
+ * Not implemented: multiple path patterns, exclusions, and the compression
+ * level input. A single path or glob covers what a build produces.
+ */
+static int
+action_upload_artifact(const sgug_job *job, const sgug_step *step,
+    const sgug_step_opts *opts, sgug_step_output_fn on_line, void *ctx,
+    char *err, size_t errlen)
+{
+	sgug_http_client *http = NULL;
+	sgug_results *r = NULL;
+	const char *argv[8];
+	char zippath[512];
+	const char *name, *path;
+	int rc;
+
+	name = sgug_token_map_str(step->inputs, "name", "artifact");
+	path = sgug_token_map_str(step->inputs, "path", NULL);
+
+	if (path == NULL || *path == '\0') {
+		seterr(err, errlen, "upload-artifact: no path given");
+		return -1;
+	}
+
+	sgug_snprintf(zippath, sizeof(zippath), "%s/artifact-%ld.zip",
+	    opts->temp_dir, (long)getpid());
+
+	say(on_line, ctx, "Zipping %s", path);
+
+	argv[0] = "zip";
+	argv[1] = "-q";
+	argv[2] = "-r";
+	argv[3] = zippath;
+	argv[4] = path;
+	argv[5] = NULL;
+
+	rc = sgug_run_argv(argv, opts->work_dir, opts, on_line, ctx, err, errlen);
+	if (rc != 0) {
+		seterr(err, errlen, "upload-artifact: zip failed (%d)", rc);
+		return rc != 0 ? rc : -1;
+	}
+
+	r = results_for(job, &http);
+	if (r == NULL) {
+		seterr(err, errlen, "upload-artifact: no results service for "
+		    "this job");
+		unlink(zippath);
+		return -1;
+	}
+
+	say(on_line, ctx, "Uploading artifact %s", name);
+	rc = sgug_artifact_upload(r, name, zippath, err, errlen);
+	if (rc == 0)
+		say(on_line, ctx, "Uploaded %s", name);
+
+	unlink(zippath);
+	sgug_results_free(r);
+	sgug_http_client_free(http);
+	return rc;
+}
+
+/* actions/download-artifact. Fetches the zip and unpacks it. */
+static int
+action_download_artifact(const sgug_job *job, const sgug_step *step,
+    const sgug_step_opts *opts, sgug_step_output_fn on_line, void *ctx,
+    char *err, size_t errlen)
+{
+	sgug_http_client *http = NULL;
+	sgug_results *r = NULL;
+	const char *argv[8];
+	char zippath[512];
+	char dest[512];
+	const char *name, *path;
+	int rc;
+
+	name = sgug_token_map_str(step->inputs, "name", "artifact");
+	path = sgug_token_map_str(step->inputs, "path", NULL);
+
+	if (path != NULL && *path != '\0')
+		sgug_snprintf(dest, sizeof(dest), "%s/%s", opts->work_dir, path);
+	else
+		sgug_snprintf(dest, sizeof(dest), "%s", opts->work_dir);
+
+	if (mkdir(dest, 0755) != 0 && errno != EEXIST) {
+		seterr(err, errlen, "download-artifact: cannot create %s", dest);
+		return -1;
+	}
+
+	sgug_snprintf(zippath, sizeof(zippath), "%s/download-%ld.zip",
+	    opts->temp_dir, (long)getpid());
+
+	r = results_for(job, &http);
+	if (r == NULL) {
+		seterr(err, errlen, "download-artifact: no results service for "
+		    "this job");
+		return -1;
+	}
+
+	say(on_line, ctx, "Downloading artifact %s", name);
+	rc = sgug_artifact_download(r, name, zippath, err, errlen);
+
+	sgug_results_free(r);
+	sgug_http_client_free(http);
+
+	if (rc != 0)
+		return rc;
+
+	argv[0] = "unzip";
+	argv[1] = "-q";
+	argv[2] = "-o";
+	argv[3] = zippath;
+	argv[4] = "-d";
+	argv[5] = dest;
+	argv[6] = NULL;
+
+	rc = sgug_run_argv(argv, opts->work_dir, opts, on_line, ctx, err, errlen);
+	unlink(zippath);
+
+	if (rc != 0) {
+		seterr(err, errlen, "download-artifact: unzip failed (%d)", rc);
+		return rc;
+	}
+
+	say(on_line, ctx, "Extracted %s into %s", name, dest);
+	return 0;
+}
+
 static const struct {
 	const char *name;
 	sgug_action_fn fn;
 } HANDLERS[] = {
-	{ "actions/checkout", action_checkout }
+	{ "actions/checkout", action_checkout },
+	{ "actions/upload-artifact", action_upload_artifact },
+	{ "actions/download-artifact", action_download_artifact }
 };
 
 sgug_action_fn
@@ -257,5 +421,6 @@ sgug_action_lookup(const char *action_name)
 const char *
 sgug_action_supported(void)
 {
-	return "actions/checkout";
+	return "actions/checkout, actions/upload-artifact, "
+	    "actions/download-artifact";
 }

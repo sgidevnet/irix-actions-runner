@@ -1,6 +1,9 @@
 #include "proto/results.h"
 
 #include "json/json.h"
+
+#include <openssl/evp.h>
+#include <stdio.h>
 #include "proto/config.h"
 
 #include <stdarg.h>
@@ -10,6 +13,10 @@
 
 #define RECEIVER "twirp/results.services.receiver.Receiver/"
 #define STEPSVC "twirp/github.actions.results.api.v1.WorkflowStepUpdateService/"
+#define ARTSVC "twirp/github.actions.results.api.v1.ArtifactService/"
+
+/* The artifact format version the service expects for v4 artifacts. */
+#define ARTIFACT_VERSION 7
 #define TIMEOUT_MS 60000
 
 struct sgug_results {
@@ -390,4 +397,293 @@ sgug_results_job_log(sgug_results *r, const char *log, size_t len,
 	/* No step id: the job-level request carries only the two run ids. */
 	return upload(r, NULL, "GetJobLogsSignedBlobURL",
 	    "CreateJobLogsMetadata", log, len, line_count, err, errlen);
+}
+
+/* sha256 of a file, lowercase hex. The service compares it on finalize. */
+static int
+sha256_file(const char *path, char *hex, size_t hexlen, int64_t *size)
+{
+	static const char HEXD[] = "0123456789abcdef";
+	unsigned char buf[16384];
+	unsigned char md[32];
+	unsigned int mdlen = 0;
+	EVP_MD_CTX *ctx;
+	FILE *f;
+	size_t n;
+	int i;
+
+	if (hexlen < 65)
+		return -1;
+
+	f = fopen(path, "rb");
+	if (f == NULL)
+		return -1;
+
+	ctx = EVP_MD_CTX_new();
+	if (ctx == NULL || EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) {
+		EVP_MD_CTX_free(ctx);
+		fclose(f);
+		return -1;
+	}
+
+	*size = 0;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+		EVP_DigestUpdate(ctx, buf, n);
+		*size += (int64_t)n;
+	}
+	fclose(f);
+
+	EVP_DigestFinal_ex(ctx, md, &mdlen);
+	EVP_MD_CTX_free(ctx);
+
+	for (i = 0; i < (int)mdlen; i++) {
+		hex[i * 2] = HEXD[md[i] >> 4];
+		hex[i * 2 + 1] = HEXD[md[i] & 0x0f];
+	}
+	hex[mdlen * 2] = '\0';
+	return 0;
+}
+
+static char *
+slurp(const char *path, size_t *len)
+{
+	FILE *f = fopen(path, "rb");
+	char *buf;
+	long n;
+
+	if (f == NULL)
+		return NULL;
+	fseek(f, 0, SEEK_END);
+	n = ftell(f);
+	fseek(f, 0, SEEK_SET);
+
+	buf = malloc((size_t)n + 1);
+	if (buf == NULL) {
+		fclose(f);
+		return NULL;
+	}
+	if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
+		free(buf);
+		fclose(f);
+		return NULL;
+	}
+	fclose(f);
+	buf[n] = '\0';
+	*len = (size_t)n;
+	return buf;
+}
+
+int
+sgug_artifact_upload(sgug_results *r, const char *name, const char *zip_path,
+    char *err, size_t errlen)
+{
+	sgug_jsonw *w = NULL;
+	sgug_http_resp *resp = NULL;
+	sgug_json_doc *doc = NULL;
+	char hex[72];
+	char hashval[80];
+	char sizebuf[24];
+	const char *body, *upload_url;
+	char *zip = NULL;
+	size_t body_len, zip_len = 0;
+	int64_t size = 0;
+	int rc = -1;
+
+	if (r == NULL)
+		return -1;
+
+	if (sha256_file(zip_path, hex, sizeof(hex), &size) != 0) {
+		seterr(err, errlen, "cannot read %s", zip_path);
+		return -1;
+	}
+
+	w = sgug_jsonw_new();
+	if (w == NULL)
+		return -1;
+	sgug_jsonw_obj_begin(w);
+	sgug_jsonw_key(w, "workflow_run_backend_id");
+	sgug_jsonw_str(w, r->job->plan_id);
+	sgug_jsonw_key(w, "workflow_job_run_backend_id");
+	sgug_jsonw_str(w, r->job->job_id);
+	sgug_jsonw_key(w, "name");
+	sgug_jsonw_str(w, name);
+	sgug_jsonw_key(w, "version");
+	sgug_jsonw_int(w, ARTIFACT_VERSION);
+	sgug_jsonw_obj_end(w);
+
+	body = sgug_jsonw_done(w, &body_len);
+	if (body == NULL)
+		goto out;
+
+	if (twirp_at(r, ARTSVC, "CreateArtifact", body, body_len, &resp, err,
+	    errlen) != 0)
+		goto out;
+
+	{
+		size_t rl;
+		const char *rb = sgug_http_body(resp, &rl);
+
+		doc = sgug_json_parse(rb, rl, NULL, 0);
+	}
+	upload_url = doc != NULL
+	    ? field(sgug_json_root(doc), "signed_upload_url", "signedUploadUrl")
+	    : NULL;
+	if (upload_url == NULL || *upload_url == '\0') {
+		seterr(err, errlen, "CreateArtifact returned no upload URL");
+		goto out;
+	}
+
+	zip = slurp(zip_path, &zip_len);
+	if (zip == NULL) {
+		seterr(err, errlen, "cannot read %s", zip_path);
+		goto out;
+	}
+
+	{
+		const char *bh[2];
+		sgug_http_resp *put = NULL;
+
+		bh[0] = "x-ms-blob-type: BlockBlob";
+		bh[1] = "Content-Type: application/zip";
+
+		if (sgug_http_request(r->http, "PUT", upload_url, bh, 2, zip,
+		    zip_len, TIMEOUT_MS, &put) != 0) {
+			seterr(err, errlen, "artifact upload: %s",
+			    sgug_http_last_error());
+			goto out;
+		}
+		if (sgug_http_status(put) >= 300) {
+			seterr(err, errlen, "artifact upload returned %d",
+			    sgug_http_status(put));
+			sgug_http_resp_free(put);
+			goto out;
+		}
+		sgug_http_resp_free(put);
+	}
+
+	sgug_json_free(doc);
+	doc = NULL;
+	sgug_http_resp_free(resp);
+	resp = NULL;
+	sgug_jsonw_free(w);
+
+	w = sgug_jsonw_new();
+	if (w == NULL)
+		goto out;
+
+	sgug_i64toa(size, sizebuf, sizeof(sizebuf));
+	sgug_snprintf(hashval, sizeof(hashval), "sha256:%s", hex);
+
+	sgug_jsonw_obj_begin(w);
+	sgug_jsonw_key(w, "workflow_run_backend_id");
+	sgug_jsonw_str(w, r->job->plan_id);
+	sgug_jsonw_key(w, "workflow_job_run_backend_id");
+	sgug_jsonw_str(w, r->job->job_id);
+	sgug_jsonw_key(w, "name");
+	sgug_jsonw_str(w, name);
+	sgug_jsonw_key(w, "size");
+	sgug_jsonw_str(w, sizebuf);
+	sgug_jsonw_key(w, "hash");
+	sgug_jsonw_str(w, hashval);
+	sgug_jsonw_obj_end(w);
+
+	body = sgug_jsonw_done(w, &body_len);
+	if (body == NULL)
+		goto out;
+
+	if (twirp_at(r, ARTSVC, "FinalizeArtifact", body, body_len, NULL, err,
+	    errlen) != 0)
+		goto out;
+
+	rc = 0;
+
+out:
+	free(zip);
+	sgug_json_free(doc);
+	sgug_http_resp_free(resp);
+	sgug_jsonw_free(w);
+	return rc;
+}
+
+int
+sgug_artifact_download(sgug_results *r, const char *name, const char *zip_path,
+    char *err, size_t errlen)
+{
+	sgug_jsonw *w = NULL;
+	sgug_http_resp *resp = NULL, *get = NULL;
+	sgug_json_doc *doc = NULL;
+	const char *body, *url, *data;
+	size_t body_len, dlen;
+	FILE *f;
+	int rc = -1;
+
+	if (r == NULL)
+		return -1;
+
+	w = sgug_jsonw_new();
+	if (w == NULL)
+		return -1;
+	sgug_jsonw_obj_begin(w);
+	sgug_jsonw_key(w, "workflow_run_backend_id");
+	sgug_jsonw_str(w, r->job->plan_id);
+	sgug_jsonw_key(w, "workflow_job_run_backend_id");
+	sgug_jsonw_str(w, r->job->job_id);
+	sgug_jsonw_key(w, "name");
+	sgug_jsonw_str(w, name);
+	sgug_jsonw_obj_end(w);
+
+	body = sgug_jsonw_done(w, &body_len);
+	if (body == NULL)
+		goto out;
+
+	if (twirp_at(r, ARTSVC, "GetSignedArtifactURL", body, body_len, &resp,
+	    err, errlen) != 0)
+		goto out;
+
+	{
+		size_t rl;
+		const char *rb = sgug_http_body(resp, &rl);
+
+		doc = sgug_json_parse(rb, rl, NULL, 0);
+	}
+	url = doc != NULL
+	    ? field(sgug_json_root(doc), "signed_url", "signedUrl") : NULL;
+	if (url == NULL || *url == '\0') {
+		seterr(err, errlen, "no artifact named \"%s\"", name);
+		goto out;
+	}
+
+	if (sgug_http_request(r->http, "GET", url, NULL, 0, NULL, 0, TIMEOUT_MS,
+	    &get) != 0) {
+		seterr(err, errlen, "artifact download: %s",
+		    sgug_http_last_error());
+		goto out;
+	}
+	if (sgug_http_status(get) >= 300) {
+		seterr(err, errlen, "artifact download returned %d",
+		    sgug_http_status(get));
+		goto out;
+	}
+
+	data = sgug_http_body(get, &dlen);
+	f = fopen(zip_path, "wb");
+	if (f == NULL) {
+		seterr(err, errlen, "cannot write %s", zip_path);
+		goto out;
+	}
+	if (fwrite(data, 1, dlen, f) != dlen) {
+		fclose(f);
+		seterr(err, errlen, "short write to %s", zip_path);
+		goto out;
+	}
+	fclose(f);
+
+	rc = 0;
+
+out:
+	sgug_http_resp_free(get);
+	sgug_json_free(doc);
+	sgug_http_resp_free(resp);
+	sgug_jsonw_free(w);
+	return rc;
 }
