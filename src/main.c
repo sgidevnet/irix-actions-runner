@@ -232,6 +232,18 @@ report_message(void *ctx, const sgug_message *msg)
 	    strcmp(msg->type, "RunnerJobRequest") == 0) {
 		printf("          job request received; execution is not "
 		    "implemented yet\n");
+		/* Keeping the whole message makes the next development step
+		 * work from real service output rather than documentation. */
+		{
+			FILE *f = fopen("/tmp/last-job-message.json", "wb");
+
+			if (f != NULL) {
+				fwrite(msg->body, 1, msg->body_len, f);
+				fclose(f);
+				printf("          saved to "
+				    "/tmp/last-job-message.json\n");
+			}
+		}
 	}
 	if (getenv("SGUG_DUMP_MESSAGES") != NULL)
 		printf("          body: %.*s\n", (int)msg->body_len, msg->body);

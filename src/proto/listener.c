@@ -45,6 +45,11 @@ struct session {
 struct lstate {
 	struct session s;
 	char broker_url[SGUG_MAX_URL];
+
+	/* Job currently held, empty when idle. */
+	char job_id[64];
+	/* Consecutive messages we had no action for, used to avoid spinning. */
+	int idle_messages;
 };
 
 /* Joins the broker base and a path, tolerating a trailing slash on the base. */
@@ -58,6 +63,10 @@ broker_url(const struct lstate *st, const char *leaf, char *out, size_t outlen)
 	else
 		sgug_snprintf(out, outlen, "%s/%s", st->broker_url, leaf);
 }
+
+/* Declared early: session_create releases an orphaned session when the service
+ * redirects it to the broker. */
+static void session_delete(const sgug_listener_opts *o, const struct lstate *st);
 
 static void
 seterr(char *err, size_t errlen, const char *fmt, ...)
@@ -228,6 +237,20 @@ session_create(const sgug_listener_opts *o, struct lstate *st, char *err,
 
 		if (bu != NULL && *bu != '\0' &&
 		    strcmp(bu, st->broker_url) != 0) {
+			/*
+			 * Release it before switching. The session just created
+			 * belongs to the old endpoint, and abandoning it makes
+			 * the next start collide with itself: the service
+			 * answers 409 until the orphan expires, costing about a
+			 * minute of retries on every restart.
+			 */
+			sgug_snprintf(s->id, sizeof(s->id), "%s",
+			    sgug_json_string(sgug_json_get(root, "sessionId"),
+			    ""));
+			if (s->id[0] != '\0')
+				session_delete(o, st);
+			s->id[0] = '\0';
+
 			sgug_snprintf(st->broker_url, sizeof(st->broker_url),
 			    "%s", bu);
 			seterr(err, errlen,
@@ -339,8 +362,17 @@ session_delete(const sgug_listener_opts *o, const struct lstate *st)
 	}
 
 	if (sgug_http_request(o->http, "DELETE", url, headers, 2, NULL, 0,
-	    SHORT_TIMEOUT_MS, &r) == 0)
+	    SHORT_TIMEOUT_MS, &r) == 0) {
+		if (o->verbose >= 1 || sgug_http_status(r) >= 300) {
+			fprintf(stderr, "session delete %s -> %d\n",
+			    st->broker_url[0] != '\0' ? "(broker)" : "(pool)",
+			    sgug_http_status(r));
+		}
 		sgug_http_resp_free(r);
+	} else {
+		fprintf(stderr, "session delete failed: %s\n",
+		    sgug_http_last_error());
+	}
 }
 
 /*
@@ -704,6 +736,15 @@ poll_once(const sgug_listener_opts *o, struct lstate *st, int64_t *last_id,
 		    sgug_json_get(sgug_json_root(bd), "brokerBaseUrl"), NULL) : NULL;
 
 		if (bu != NULL && *bu != '\0') {
+			/*
+			 * Release the pool session before switching. It is
+			 * still addressed by the old endpoint, and abandoning
+			 * it makes the next start collide with itself: the
+			 * service answers 409 until the orphan expires, which
+			 * costs roughly a minute of retries on every restart.
+			 */
+			session_delete(o, st);
+
 			sgug_snprintf(st->broker_url, sizeof(st->broker_url),
 			    "%s", bu);
 			printf("migrating to broker %s\n", st->broker_url);
@@ -719,6 +760,33 @@ poll_once(const sgug_listener_opts *o, struct lstate *st, int64_t *last_id,
 		rc = 1;
 		goto out;
 	}
+
+	/*
+	 * A cancellation for a job we are not running is stale: it refers to
+	 * one abandoned by an earlier process, and the service repeats it on
+	 * every poll. Answering immediately turns the long poll into a busy
+	 * loop against the API, so these are counted and the caller backs off.
+	 */
+	if (strcmp(type, "JobCancellation") == 0) {
+		sgug_json_doc *cd = sgug_json_parse(plain, body_len, NULL, 0);
+		const char *jid = cd != NULL ? sgug_json_string(
+		    sgug_json_get(sgug_json_root(cd), "jobId"), "") : "";
+		int mine = st->job_id[0] != '\0' && strcmp(jid, st->job_id) == 0;
+
+		if (!mine) {
+			st->idle_messages++;
+			sgug_json_free(cd);
+			rc = 1;
+			goto out;
+		}
+
+		printf("cancellation requested for the running job\n");
+		fflush(stdout);
+		st->job_id[0] = '\0';
+		sgug_json_free(cd);
+	}
+
+	st->idle_messages = 0;
 
 	if (strcmp(type, "RunnerJobRequest") == 0) {
 		char acq_err[256];
@@ -740,6 +808,18 @@ poll_once(const sgug_listener_opts *o, struct lstate *st, int64_t *last_id,
 		free(plain);
 		plain = full;
 		body_len = strlen(plain);
+
+		{
+			sgug_json_doc *jd = sgug_json_parse(plain, body_len,
+			    NULL, 0);
+
+			if (jd != NULL) {
+				sgug_snprintf(st->job_id, sizeof(st->job_id),
+				    "%s", sgug_json_string(sgug_json_get(
+				    sgug_json_root(jd), "jobId"), ""));
+				sgug_json_free(jd);
+			}
+		}
 		/* Downstream sees the pool flow's message type, since the
 		 * payload is identical. */
 		type = "PipelineAgentJobRequest";
@@ -814,6 +894,20 @@ sgug_listen(const sgug_listener_opts *o, char *err, size_t errlen)
 		switch (poll_once(o, &st, &last_id, &handler_stop, local_err,
 		    sizeof(local_err))) {
 		case 1:
+			/*
+			 * Messages we cannot act on arrive as fast as we ask for
+			 * them. Without this the runner issues thousands of
+			 * requests a minute against a job it does not hold.
+			 */
+			if (st.idle_messages > 5) {
+				if (st.idle_messages == 6)
+					fprintf(stderr, "ignoring repeated "
+					    "messages for a job this runner "
+					    "does not hold; backing off\n");
+				backoff_sleep(10, o->stop);
+			}
+			consecutive_errors = 0;
+			break;
 		case 0:
 			consecutive_errors = 0;
 			if (o->verbose >= 2) {
@@ -843,6 +937,15 @@ sgug_listen(const sgug_listener_opts *o, char *err, size_t errlen)
 		}
 	}
 
+	/*
+	 * Cleanup must outlive the shutdown request. The abort check is what
+	 * makes a blocked long poll return promptly, but it applies to every
+	 * request, so with the stop flag already set the session delete is
+	 * abandoned before it is sent and the session lingers server side. The
+	 * next start then collides with the orphan and spends a minute
+	 * retrying against 409.
+	 */
+	sgug_http_set_abort_check(o->http, NULL, NULL);
 	session_delete(o, &st);
 	explicit_bzero(&st, sizeof(st));
 	return rc;
