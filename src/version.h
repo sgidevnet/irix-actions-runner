@@ -2,16 +2,24 @@
 #define SGUG_VERSION_H
 
 /*
+ * This project's own release, and the only version a user should care about.
+ * The release workflow refuses to publish unless the git tag, this constant and
+ * the CHANGELOG entry all agree.
+ */
+#define SGUG_PROJECT_VERSION "0.1.0"
+
+/*
  * Reported to the Actions service at registration and on every long poll.
  *
  * The service enforces a minimum and refuses to dispatch to a runner below it,
  * so this tracks GitHub's current release rather than our own progress. Bump it
- * when the floor rises; nothing else depends on the value.
+ * when the floor rises; nothing else depends on the value. Unrelated to
+ * SGUG_PROJECT_VERSION, and the two move on their own schedules.
  */
 #define SGUG_RUNNER_VERSION "2.336.0"
 
 #define SGUG_USER_AGENT \
-	"irix-actions-runner/" SGUG_RUNNER_VERSION " (IRIX; mips)"
+	"irix-actions-runner/" SGUG_PROJECT_VERSION " (IRIX; mips)"
 
 /*
  * The OS this runner claims to be.

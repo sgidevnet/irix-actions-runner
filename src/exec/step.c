@@ -343,11 +343,40 @@ sgug_run_argv(const char *const *argv, const char *cwd,
 	    ctx, err, errlen);
 }
 
+/*
+ * GitHub's documented default is "bash --noprofile --norc -eo pipefail {0}",
+ * and sh gets "-e". Without -e the script's status is the last command's, so
+ * every command before it stops being a gate: a step that checks something and
+ * then prints a summary reports success no matter what the check found.
+ */
+static size_t
+shell_argv(const char *shell, const char *script, const char **argv)
+{
+	const char *base = strrchr(shell, '/');
+	size_t n = 0;
+
+	base = base != NULL ? base + 1 : shell;
+
+	argv[n++] = shell;
+	if (strstr(base, "bash") != NULL) {
+		argv[n++] = "--noprofile";
+		argv[n++] = "--norc";
+		argv[n++] = "-e";
+		argv[n++] = "-o";
+		argv[n++] = "pipefail";
+	} else {
+		argv[n++] = "-e";
+	}
+	argv[n++] = script;
+	argv[n] = NULL;
+	return n;
+}
+
 int
 sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
     sgug_step_output_fn on_line, void *ctx, char *err, size_t errlen)
 {
-	const char *argv[3];
+	const char *argv[9];
 	char script_path[512];
 	const char *cwd;
 	int rc;
@@ -361,9 +390,8 @@ sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
 	    sizeof(script_path), err, errlen) != 0)
 		return -1;
 
-	argv[0] = resolve_shell(step->shell != NULL ? step->shell : opts->shell);
-	argv[1] = script_path;
-	argv[2] = NULL;
+	shell_argv(resolve_shell(step->shell != NULL ? step->shell : opts->shell),
+	    script_path, argv);
 
 	cwd = step->working_directory != NULL && *step->working_directory != '\0'
 	    ? step->working_directory : opts->work_dir;

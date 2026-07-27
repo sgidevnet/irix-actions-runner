@@ -32,6 +32,17 @@
 const char *sgug_token_str(const sgug_json *tok, const char *fallback);
 
 /*
+ * Whether a scalar token carries a literal value that sgug_token_str can read.
+ *
+ * False for the expression form the service emits when the YAML contained
+ * `${{ }}`: a whole scalar becomes an expression token, and an interpolated one
+ * becomes a format() call over the literal parts. Callers must distinguish that
+ * from an absent key, because the fallback for an expression is indistinguishable
+ * from "not set" and silently produces an empty script.
+ */
+int sgug_token_is_literal(const sgug_json *tok);
+
+/*
  * Value for a key inside a mapping token, matched case-insensitively.
  * Returns NULL when absent or when tok is not a mapping.
  */

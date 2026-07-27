@@ -265,6 +265,65 @@ test_timeout(void)
 	capture_free(&c);
 }
 
+/*
+ * A failing command must end the script. Without -e the status is the last
+ * command's, so a step that checks something and then prints a summary passes
+ * no matter what the check found, which makes every gate in a workflow
+ * decorative.
+ */
+static void
+test_stops_on_first_failure(void)
+{
+	sgug_step st;
+	sgug_step_opts o;
+	struct capture c;
+	char err[256];
+	int status;
+
+	memset(&c, 0, sizeof(c));
+	memset(&st, 0, sizeof(st));
+	st.script = "echo first\nfalse\necho unreachable\n";
+
+	memset(&o, 0, sizeof(o));
+	o.work_dir = "/tmp";
+	o.temp_dir = "/tmp";
+	o.timeout_seconds = 30;
+
+	err[0] = '\0';
+	status = sgug_step_run(&st, &o, collect, &c, err, sizeof(err));
+	CHECK(status != 0);
+	CHECK_EQ_INT((int)c.n, 1);
+	if (c.n >= 1)
+		CHECK_EQ_STR(c.lines[0], "first");
+	capture_free(&c);
+}
+
+/* pipefail: a failure upstream of a pipe must not be hidden by a good tail. */
+static void
+test_pipefail(void)
+{
+	sgug_step st;
+	sgug_step_opts o;
+	struct capture c;
+	char err[256];
+	int status;
+
+	memset(&c, 0, sizeof(c));
+	memset(&st, 0, sizeof(st));
+	st.shell = "bash";
+	st.script = "false | cat\n";
+
+	memset(&o, 0, sizeof(o));
+	o.work_dir = "/tmp";
+	o.temp_dir = "/tmp";
+	o.timeout_seconds = 30;
+
+	err[0] = '\0';
+	status = sgug_step_run(&st, &o, collect, &c, err, sizeof(err));
+	CHECK(status != 0);
+	capture_free(&c);
+}
+
 static void
 test_working_directory(void)
 {
@@ -322,6 +381,8 @@ main(void)
 	test_no_stdin();
 	test_abort();
 	test_timeout();
+	test_stops_on_first_failure();
+	test_pipefail();
 	test_working_directory();
 	test_script_file_removed();
 

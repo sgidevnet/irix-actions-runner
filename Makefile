@@ -17,7 +17,11 @@ CC      := $(SGUG)/bin/gcc
 # -Isrc must precede the SGUG include dir. SGUG ships JsonCpp at
 # /usr/sgug/include/json/json.h, which collides with our own json/json.h; with
 # the order reversed, MIPSPro pulls in the C++ header and dies on <cstddef>.
-CFLAGS  := -std=c99 -O2 $(WARNS) -mabi=n32 -mabicalls \
+# -mips3 is the portability floor, not a default worth inheriting. MIPS III is
+# R4000 and later, which is every CPU that can run IRIX 6.5; a mips-4 binary
+# would silently exclude the R4400 and R5000 machines this project exists for.
+# The release workflow asserts the ISA of the shipped binary against this.
+CFLAGS  := -std=c99 -O2 $(WARNS) -mabi=n32 -mabicalls -mips3 \
            -D_SGI_SOURCE -D_SGI_MP_SOURCE -D_SGI_REENTRANT_FUNCTIONS \
            -Isrc -I$(SGUG)/include
 # Static OpenSSL keeps the binary self-contained on machines without SGUG-RSE.

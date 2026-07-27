@@ -18,7 +18,7 @@
 typedef enum {
 	SGUG_STEP_SCRIPT,	/* run:, the only kind we execute */
 	SGUG_STEP_ACTION,	/* uses:, dispatched to a native handler */
-	SGUG_STEP_UNSUPPORTED	/* docker, container registry */
+	SGUG_STEP_UNSUPPORTED	/* docker, container registry, ${{ }} bodies */
 } sgug_step_kind;
 
 typedef struct {
@@ -40,6 +40,10 @@ typedef struct {
 	/* The step's `with:` block, for a handler to read. Still a
 	 * TemplateToken, so read it with the exec/token.h accessors. */
 	const sgug_json *inputs;
+
+	/* SGUG_STEP_UNSUPPORTED: what to tell the user. Never NULL for that
+	 * kind, so the reason reaches the job log instead of a generic line. */
+	const char *unsupported_reason;
 
 	int continue_on_error;
 	int timeout_minutes;		/* 0 when unset */

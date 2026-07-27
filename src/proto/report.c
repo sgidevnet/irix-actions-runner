@@ -3,6 +3,7 @@
 #include "crypto/b64.h"
 #include "json/json.h"
 #include "proto/config.h"
+#include "proto/mask.h"
 #include "proto/results.h"
 
 #include <stdio.h>
@@ -433,32 +434,13 @@ sgug_report_step_started(sgug_reporter *r, size_t i)
 }
 
 /*
- * Replaces every literal secret the service listed. Done on the way out rather
- * than at the point of logging, so nothing can bypass it.
+ * Applied on the way out rather than at the point of logging, so nothing can
+ * bypass it.
  */
 static char *
 redact(const sgug_reporter *r, const char *line)
 {
-	char *out = strdup(line);
-	size_t m;
-
-	if (out == NULL)
-		return NULL;
-
-	for (m = 0; m < r->job->nmasks; m++) {
-		const char *secret = r->job->masks[m];
-		size_t slen = strlen(secret);
-		char *p;
-
-		if (slen == 0)
-			continue;
-
-		while ((p = strstr(out, secret)) != NULL) {
-			memmove(p + 3, p + slen, strlen(p + slen) + 1);
-			memcpy(p, "***", 3);
-		}
-	}
-	return out;
+	return sgug_mask_apply(r->job->masks, r->job->nmasks, line);
 }
 
 static int
