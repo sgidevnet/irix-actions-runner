@@ -9,6 +9,7 @@
 #include <string.h>
 
 #define RECEIVER "twirp/results.services.receiver.Receiver/"
+#define STEPSVC "twirp/github.actions.results.api.v1.WorkflowStepUpdateService/"
 #define TIMEOUT_MS 60000
 
 struct sgug_results {
@@ -16,6 +17,8 @@ struct sgug_results {
 	const sgug_job *job;
 	char auth[4096];
 	char base[SGUG_MAX_URL];
+	/* Monotonic across the job; the service drops out-of-order updates. */
+	int64_t change_order;
 };
 
 static void
@@ -82,15 +85,131 @@ emit_ids(sgug_jsonw *w, const sgug_job *job, const char *step_id)
 	}
 }
 
+void
+sgug_results_timestamp(sgug_time_t t, char *out, size_t outlen)
+{
+	char full[40];
+	size_t n;
+
+	/* The shared helper emits seven fractional digits for the timeline API;
+	 * this service wants three. Trim rather than reformat. */
+	sgug_format_iso8601(t, full, sizeof(full));
+	n = strlen(full);
+	if (n >= 12) {
+		full[n - 5] = 'Z';
+		full[n - 4] = '\0';
+	}
+	sgug_snprintf(out, outlen, "%s", full);
+}
+
+static const char *
+status_name(sgug_step_status s)
+{
+	switch (s) {
+	case SGUG_STEP_RUNNING: return "STATUS_IN_PROGRESS";
+	case SGUG_STEP_DONE: return "STATUS_COMPLETED";
+	default: return "STATUS_PENDING";
+	}
+}
+
+/* Protobuf enum names, which is how Twirp JSON encodes them. */
+static const char *
+conclusion_name(const char *result)
+{
+	if (result == NULL)
+		return "CONCLUSION_UNKNOWN";
+	if (strcmp(result, "succeeded") == 0)
+		return "CONCLUSION_SUCCESS";
+	if (strcmp(result, "failed") == 0)
+		return "CONCLUSION_FAILURE";
+	if (strcmp(result, "canceled") == 0)
+		return "CONCLUSION_CANCELLED";
+	if (strcmp(result, "skipped") == 0)
+		return "CONCLUSION_SKIPPED";
+	return "CONCLUSION_UNKNOWN";
+}
+
 static int
-twirp(sgug_results *r, const char *method, const char *body, size_t body_len,
-    sgug_http_resp **out, char *err, size_t errlen)
+twirp_at(sgug_results *r, const char *svc, const char *method,
+    const char *body, size_t body_len, sgug_http_resp **out, char *err,
+    size_t errlen);
+
+int
+sgug_results_steps_update(sgug_results *r, const sgug_step_state *steps,
+    size_t nsteps, char *err, size_t errlen)
+{
+	sgug_jsonw *w;
+	const char *body;
+	size_t body_len, i;
+	int rc;
+
+	if (r == NULL || nsteps == 0)
+		return 0;
+
+	w = sgug_jsonw_new();
+	if (w == NULL)
+		return -1;
+
+	sgug_jsonw_obj_begin(w);
+	sgug_jsonw_key(w, "workflow_run_backend_id");
+	sgug_jsonw_str(w, r->job->plan_id);
+	sgug_jsonw_key(w, "workflow_job_run_backend_id");
+	sgug_jsonw_str(w, r->job->job_id);
+	sgug_jsonw_key(w, "change_order");
+	sgug_jsonw_int(w, ++r->change_order);
+
+	sgug_jsonw_key(w, "steps");
+	sgug_jsonw_arr_begin(w);
+	for (i = 0; i < nsteps; i++) {
+		const sgug_step_state *st = &steps[i];
+
+		sgug_jsonw_obj_begin(w);
+		sgug_jsonw_key(w, "external_id");
+		sgug_jsonw_str(w, st->external_id);
+		sgug_jsonw_key(w, "number");
+		sgug_jsonw_int(w, st->number);
+		sgug_jsonw_key(w, "name");
+		sgug_jsonw_str(w, st->name);
+		sgug_jsonw_key(w, "status");
+		sgug_jsonw_str(w, status_name(st->status));
+		sgug_jsonw_key(w, "conclusion");
+		sgug_jsonw_str(w, st->status == SGUG_STEP_DONE
+		    ? conclusion_name(st->conclusion) : "CONCLUSION_UNKNOWN");
+		if (st->started_at != NULL && st->started_at[0] != '\0') {
+			sgug_jsonw_key(w, "started_at");
+			sgug_jsonw_str(w, st->started_at);
+		}
+		if (st->completed_at != NULL && st->completed_at[0] != '\0') {
+			sgug_jsonw_key(w, "completed_at");
+			sgug_jsonw_str(w, st->completed_at);
+		}
+		sgug_jsonw_obj_end(w);
+	}
+	sgug_jsonw_arr_end(w);
+	sgug_jsonw_obj_end(w);
+
+	body = sgug_jsonw_done(w, &body_len);
+	if (body == NULL) {
+		sgug_jsonw_free(w);
+		return -1;
+	}
+
+	rc = twirp_at(r, STEPSVC, "WorkflowStepsUpdate", body, body_len, NULL,
+	    err, errlen);
+	sgug_jsonw_free(w);
+	return rc;
+}
+
+static int
+twirp_at(sgug_results *r, const char *svc, const char *method,
+    const char *body, size_t body_len, sgug_http_resp **out, char *err,
+    size_t errlen)
 {
 	char url[SGUG_MAX_URL];
 	const char *headers[3];
 	sgug_http_resp *resp = NULL;
 
-	sgug_snprintf(url, sizeof(url), "%s%s%s", r->base, RECEIVER, method);
+	sgug_snprintf(url, sizeof(url), "%s%s%s", r->base, svc, method);
 
 	headers[0] = r->auth;
 	headers[1] = "Accept: application/json";
@@ -114,6 +233,14 @@ twirp(sgug_results *r, const char *method, const char *body, size_t body_len,
 	else
 		sgug_http_resp_free(resp);
 	return 0;
+}
+
+/* The receiver service carries the logs; the step service is separate. */
+static int
+twirp(sgug_results *r, const char *method, const char *body, size_t body_len,
+    sgug_http_resp **out, char *err, size_t errlen)
+{
+	return twirp_at(r, RECEIVER, method, body, body_len, out, err, errlen);
 }
 
 /*

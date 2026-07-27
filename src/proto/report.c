@@ -58,6 +58,7 @@ struct sgug_reporter {
 
 	/* NULL on deployments that still use the timeline API. */
 	sgug_results *results;
+	int steps_update_broken;
 
 	char err[512];
 };
@@ -258,6 +259,64 @@ emit_record(sgug_jsonw *w, const char *id, const char *parent, const char *type,
 	sgug_jsonw_obj_end(w);
 }
 
+/*
+ * Pushes the current state of every step to the results service, which is what
+ * makes them light up as the job runs. Without it the UI shows nothing until
+ * completejob lands and every step appears at once.
+ */
+static void
+push_steps(sgug_reporter *r)
+{
+	sgug_step_state states[SGUG_JOB_MAX_STEPS];
+	char err[256];
+	size_t i;
+
+	if (r->results == NULL || r->job->nsteps == 0)
+		return;
+
+	for (i = 0; i < r->job->nsteps; i++) {
+		struct step_state *st = &r->steps[i];
+
+		states[i].external_id = st->record_id;
+		states[i].name = r->job->steps[i].display_name;
+		states[i].number = (int)i + 1;
+		states[i].started_at = st->started[0] != '\0' ? st->started : NULL;
+		states[i].completed_at =
+		    st->finished[0] != '\0' ? st->finished : NULL;
+
+		if (st->ran) {
+			states[i].status = SGUG_STEP_DONE;
+			states[i].conclusion = result_name(st->result);
+		} else if (st->started[0] != '\0') {
+			states[i].status = SGUG_STEP_RUNNING;
+			states[i].conclusion = NULL;
+		} else {
+			states[i].status = SGUG_STEP_PENDING;
+			states[i].conclusion = NULL;
+		}
+	}
+
+	/*
+	 * Best effort, and disabled after the first refusal.
+	 *
+	 * This service rejects the plan id as workflow_run_backend_id with
+	 * "workflow run not found", even though the receiver service accepts
+	 * the same value for log uploads, so the identifier it wants is
+	 * something else. Live step state is cosmetic: completejob still
+	 * carries accurate per-step results and timestamps, so a failure here
+	 * costs the running highlight and nothing else.
+	 */
+	if (r->steps_update_broken)
+		return;
+
+	err[0] = '\0';
+	if (sgug_results_steps_update(r->results, states, r->job->nsteps, err,
+	    sizeof(err)) != 0) {
+		fprintf(stderr, "live step updates unavailable: %s\n", err);
+		r->steps_update_broken = 1;
+	}
+}
+
 /* PATCH is a merge, so only changed records need sending. */
 static int
 patch_records(sgug_reporter *r, sgug_jsonw *w, int count)
@@ -367,7 +426,7 @@ sgug_report_step_started(sgug_reporter *r, size_t i)
 	if (w == NULL)
 		return -1;
 
-	sgug_format_iso8601(sgug_now(), r->steps[i].started,
+	sgug_results_timestamp(sgug_now(), r->steps[i].started,
 	    sizeof(r->steps[i].started));
 	emit_record(w, r->steps[i].record_id, r->job->job_id, "Task",
 	    r->job->steps[i].display_name, r->job->steps[i].context_name,
@@ -376,6 +435,7 @@ sgug_report_step_started(sgug_reporter *r, size_t i)
 	end_records(w);
 	rc = patch_records(r, w, 1);
 	sgug_jsonw_free(w);
+	push_steps(r);
 	return rc;
 }
 
@@ -646,7 +706,7 @@ sgug_report_step_finished(sgug_reporter *r, size_t i, sgug_result result)
 	if (w == NULL)
 		return -1;
 
-	sgug_format_iso8601(sgug_now(), st->finished, sizeof(st->finished));
+	sgug_results_timestamp(sgug_now(), st->finished, sizeof(st->finished));
 	sgug_snprintf(finished, sizeof(finished), "%s", st->finished);
 	st->result = result;
 	st->ran = 1;
@@ -658,6 +718,7 @@ sgug_report_step_finished(sgug_reporter *r, size_t i, sgug_result result)
 	end_records(w);
 	rc = patch_records(r, w, 1);
 	sgug_jsonw_free(w);
+	push_steps(r);
 	return rc;
 }
 

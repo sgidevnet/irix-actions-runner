@@ -47,4 +47,37 @@ int sgug_results_step_log(sgug_results *r, const char *step_id,
 int sgug_results_job_log(sgug_results *r, const char *log, size_t len,
     int64_t line_count, char *err, size_t errlen);
 
+/* Live step state, mirroring what the UI shows while a job runs. */
+typedef enum {
+	SGUG_STEP_PENDING,
+	SGUG_STEP_RUNNING,
+	SGUG_STEP_DONE
+} sgug_step_status;
+
+typedef struct {
+	const char *external_id;	/* the step's id */
+	const char *name;
+	int number;			/* 1 based */
+	sgug_step_status status;
+	const char *conclusion;		/* NULL unless done */
+	const char *started_at;		/* may be NULL */
+	const char *completed_at;	/* may be NULL */
+} sgug_step_state;
+
+/*
+ * Pushes the current state of every step.
+ *
+ * This is what makes steps light up as they run rather than all appearing at
+ * once when the job ends. change_order must increase across calls; the service
+ * uses it to discard updates that arrive out of order.
+ */
+int sgug_results_steps_update(sgug_results *r, const sgug_step_state *steps,
+    size_t nsteps, char *err, size_t errlen);
+
+/*
+ * Timestamp in the format the results service expects, which is three
+ * fractional digits, not the seven the timeline API wants.
+ */
+void sgug_results_timestamp(sgug_time_t t, char *out, size_t outlen);
+
 #endif /* SGUG_PROTO_RESULTS_H */
