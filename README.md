@@ -151,22 +151,36 @@ There is no IRIX emulator worth using as a substitute. QEMU has no SGI machine
 model and MAME's Indy emulation does not run 6.5 usefully, so real hardware is
 the only way to know a binary works.
 
-## Sandboxing
+## Confinement
 
-Jobs do not run as the runner. The supervisor stays root and never executes workflow code.
-Per job it forks and the child enters a chroot, drops to an unprivileged uid, applies
-resource limits, caps process count, and surrenders all IRIX capabilities before exec.
+Steps run with resource limits applied between fork and exec. Measured inside a
+real job on the Octane:
 
-What this stops: escaping the work directory, reading files the job uid cannot read,
-exhausting memory or file descriptors, fork bombs, filling the disk, leaving orphan
-processes behind.
+| Limit | Default | Stops |
+|---|---|---|
+| `RLIMIT_CPU` | 3600s | an infinite loop, which looks exactly like a long compile until this fires |
+| `RLIMIT_AS` | 1536 MB | a link step driving a 2816 MB machine into swap |
+| `RLIMIT_FSIZE` | 4096 MB | a runaway writer filling the disk |
+| `RLIMIT_NOFILE` | 512 | descriptor exhaustion |
+| `prctl(PR_MAXPROCS)` | 96 | a fork bomb. IRIX has no `RLIMIT_NPROC` |
+| `RLIMIT_CORE` | 0 | a crashing compiler dumping more than the workspace holds |
+| `prctl(PR_TERMCHILD)` | on | a backgrounded process outliving its job and holding the workspace open |
 
-What this does not stop: reaching the local network, since IRIX has no network isolation;
-consuming disk up to `RLIMIT_FSIZE` per file; using the whole machine's CPU beyond the
-per-step limit. IRIX has no namespaces, no seccomp and no jails. `chroot` plus capabilities
-plus rlimits is the entire toolbox the OS provides, and this uses all of it.
+This is aimed at accidents rather than adversaries. A parallel build that forks
+without bound and a test that resolves a path wrong are ordinary failures on a
+shared workstation, and each is cheap to bound.
 
-Do not run untrusted third-party workflows on a machine you care about.
+For the hostile case, use GitHub's fork pull request approval setting under
+Settings, Actions, General. A workflow from a fork should not run here
+unreviewed, and no amount of local confinement substitutes for that.
+
+`chroot` and a uid drop are implemented and applied when the runner is started
+as root. Started by an ordinary user, which is the usual case, the job log says
+so rather than implying containment that is not there.
+
+What none of this stops: IRIX has no network isolation, so a step can reach the
+local network. It has no namespaces, no seccomp and no jails. `chroot` plus an
+unprivileged uid plus rlimits is the whole toolbox the OS provides.
 
 ## Why
 
