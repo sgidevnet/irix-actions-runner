@@ -58,8 +58,9 @@ typedef struct {
 	 */
 	const char *service_url;	/* endpoint url, the run service */
 	const char *access_token;
-	const char *pipelines_url;	/* base for timeline and log APIs */
-	const char *results_url;
+	const char *pipelines_url;	/* legacy timeline and log APIs */
+	const char *results_url;	/* Twirp results service */
+	const char *billing_owner_id;
 
 	sgug_step steps[SGUG_JOB_MAX_STEPS];
 	size_t nsteps;

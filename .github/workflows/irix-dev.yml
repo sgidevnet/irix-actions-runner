@@ -1,0 +1,27 @@
+name: irix-dev
+
+# Development-only twin of irix.yml.
+#
+# It targets a label carried by exactly one throwaway runner, so iterating on
+# the runner cannot collide with whatever is registered in the org IRIX group.
+# irix.yml keeps the realistic `runs-on: [self-hosted, irix]`.
+#
+# Delete this once job execution is stable.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, octane-t1]
+    timeout-minutes: 5
+    steps:
+      - name: Identify the machine
+        run: |
+          uname -a
+          hinv | head -3
+
+      - name: Check the toolchain
+        run: |
+          echo "PATH=$PATH"
+          /usr/sgug/bin/gcc --version | head -1

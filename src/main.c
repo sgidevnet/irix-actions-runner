@@ -1,4 +1,5 @@
 #include "compat/irix.h"
+#include "exec/runjob.h"
 #include "json/json.h"
 #include "net/http.h"
 #include "proto/config.h"
@@ -209,10 +210,6 @@ on_signal(int sig)
 	stop_requested = 1;
 }
 
-/*
- * Until job execution exists, messages are reported and discarded. Returning 0
- * keeps the loop running, which is what makes the runner sit Online.
- */
 /* Lets a blocked long poll surface a SIGTERM instead of running to completion. */
 static int
 should_abort(void *ctx)
@@ -221,32 +218,31 @@ should_abort(void *ctx)
 	return stop_requested != 0;
 }
 
-static int
-report_message(void *ctx, const sgug_message *msg)
-{
-	int *seen = ctx;
+struct dispatch_ctx {
+	sgug_http_client *http;
+	const sgug_config *cfg;
+	int seen;
+};
 
-	(*seen)++;
+static int
+dispatch_message(void *ctx, const sgug_message *msg)
+{
+	struct dispatch_ctx *d = ctx;
+	char err[512];
+
+	d->seen++;
+
+	if (getenv("SGUG_DUMP_MESSAGES") != NULL)
+		printf("          body: %.*s\n", (int)msg->body_len, msg->body);
 
 	if (strcmp(msg->type, "PipelineAgentJobRequest") == 0 ||
 	    strcmp(msg->type, "RunnerJobRequest") == 0) {
-		printf("          job request received; execution is not "
-		    "implemented yet\n");
-		/* Keeping the whole message makes the next development step
-		 * work from real service output rather than documentation. */
-		{
-			FILE *f = fopen("/tmp/last-job-message.json", "wb");
-
-			if (f != NULL) {
-				fwrite(msg->body, 1, msg->body_len, f);
-				fclose(f);
-				printf("          saved to "
-				    "/tmp/last-job-message.json\n");
-			}
-		}
+		err[0] = '\0';
+		if (sgug_run_job(d->http, d->cfg, msg->body, msg->body_len,
+		    &stop_requested, err, sizeof(err)) != 0)
+			fprintf(stderr, "job failed to report: %s\n", err);
 	}
-	if (getenv("SGUG_DUMP_MESSAGES") != NULL)
-		printf("          body: %.*s\n", (int)msg->body_len, msg->body);
+
 	fflush(stdout);
 	return 0;
 }
@@ -261,7 +257,8 @@ cmd_run(int argc, char **argv)
 	sgug_rsa *key;
 	char keypath[SGUG_MAX_URL];
 	char err[512];
-	int seen = 0, verbose = 0, i, rc;
+	struct dispatch_ctx dctx;
+	int verbose = 0, i, rc;
 
 	for (i = 2; i < argc; i++) {
 		if (strcmp(argv[i], "--verbose") == 0)
@@ -331,8 +328,12 @@ cmd_run(int argc, char **argv)
 	opts.cfg = &cfg;
 	opts.oauth = oauth;
 	opts.key = key;
-	opts.on_message = report_message;
-	opts.ctx = &seen;
+	dctx.http = http;
+	dctx.cfg = &cfg;
+	dctx.seen = 0;
+
+	opts.on_message = dispatch_message;
+	opts.ctx = &dctx;
 	opts.stop = &stop_requested;
 	opts.verbose = verbose;
 
@@ -341,7 +342,7 @@ cmd_run(int argc, char **argv)
 	if (rc != 0 && err[0] != '\0')
 		fprintf(stderr, "%s\n", err);
 
-	printf("\nstopped after %d message(s)\n", seen);
+	printf("\nstopped after %d message(s)\n", dctx.seen);
 
 	sgug_oauth_free(oauth);
 	sgug_http_client_free(http);

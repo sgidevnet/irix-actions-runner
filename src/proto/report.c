@@ -22,6 +22,10 @@ struct step_state {
 	char record_id[40];
 	int64_t log_id;
 	char started[40];
+	char finished[40];
+	sgug_result result;
+	int ran;
+	int64_t log_lines;
 	/* Whole-step output, uploaded once at step end. */
 	char *log;
 	size_t log_len;
@@ -73,6 +77,13 @@ derive_record_id(const char *step_id, char *out, size_t outlen)
 	sgug_snprintf(out, outlen, "%s", step_id);
 }
 
+/*
+ * Development aid: reports which reporting surface this deployment actually
+ * accepts. Enabled with SGUG_PROBE, since it costs a handful of requests and
+ * needs a live job token.
+ */
+static void probe_endpoints(sgug_reporter *r);
+
 sgug_reporter *
 sgug_report_new(sgug_http_client *http, const sgug_job *job)
 {
@@ -97,6 +108,9 @@ sgug_report_new(sgug_http_client *http, const sgug_job *job)
 	for (i = 0; i < job->nsteps; i++)
 		derive_record_id(job->steps[i].id, r->steps[i].record_id,
 		    sizeof(r->steps[i].record_id));
+
+	if (getenv("SGUG_PROBE") != NULL)
+		probe_endpoints(r);
 
 	return r;
 }
@@ -144,6 +158,11 @@ send(sgug_reporter *r, const char *method, const char *url, const char *ctype,
 	if (sgug_http_status(resp) >= 300) {
 		sgug_snprintf(r->err, sizeof(r->err), "%s returned %d: %.200s",
 		    method, sgug_http_status(resp), sgug_http_body(resp, NULL));
+		/* Reporting failures were previously silent, so a job could run
+		 * to completion with nothing reaching the UI and only the final
+		 * event revealing it. */
+		fprintf(stderr, "report: %d %s %s\n", sgug_http_status(resp),
+		    method, url);
 		if (out == NULL)
 			sgug_http_resp_free(resp);
 		else
@@ -389,6 +408,7 @@ log_append(struct step_state *st, const char *text)
 	st->log_len += n;
 	st->log[st->log_len++] = '\n';
 	st->log[st->log_len] = '\0';
+	st->log_lines++;
 	return 0;
 }
 
@@ -576,7 +596,10 @@ sgug_report_step_finished(sgug_reporter *r, size_t i, sgug_result result)
 	if (w == NULL)
 		return -1;
 
-	sgug_format_iso8601(sgug_now(), finished, sizeof(finished));
+	sgug_format_iso8601(sgug_now(), st->finished, sizeof(st->finished));
+	sgug_snprintf(finished, sizeof(finished), "%s", st->finished);
+	st->result = result;
+	st->ran = 1;
 	emit_record(w, st->record_id, r->job->job_id, "Task",
 	    r->job->steps[i].display_name, r->job->steps[i].context_name,
 	    (int)i + 1, "Completed", result_name(result), st->started,
@@ -596,7 +619,7 @@ sgug_report_job_finished(sgug_reporter *r, sgug_result result)
 	char ctype[128];
 	char finished[40];
 	const char *body;
-	size_t len;
+	size_t len, i;
 	int rc;
 
 	w = begin_records(1);
@@ -612,24 +635,72 @@ sgug_report_job_finished(sgug_reporter *r, sgug_result result)
 	sgug_jsonw_free(w);
 
 	/*
-	 * The plan event is what actually completes the job and releases this
-	 * runner's parallelism slot. Skipping it leaves the agent stuck at
-	 * currentParallelism 1 and undispatchable, while still reporting
-	 * online, so it is sent even if the timeline update failed.
+	 * Completion goes to the run service, not the plan events route.
+	 *
+	 * Modern github.com does not serve the Azure DevOps timeline API for
+	 * these plans at all: the official runner v2.336.0 contains no
+	 * _apis/distributedtask routes, only run-service verbs (session,
+	 * message, acquirejob, renewjob, completejob, acknowledge) and a Twirp
+	 * results service. Every timeline call here returns 404, so step state
+	 * is carried in this payload instead.
+	 *
+	 * This is also what releases the parallelism slot. A runner that never
+	 * sends it leaves the agent stuck at currentParallelism 1 and
+	 * undispatchable while still reporting online.
 	 */
 	w = sgug_jsonw_new();
 	if (w == NULL)
 		return -1;
 
 	sgug_jsonw_obj_begin(w);
-	sgug_jsonw_key(w, "name");
-	sgug_jsonw_str(w, "JobCompleted");
+	sgug_jsonw_key(w, "planId");
+	sgug_jsonw_str(w, r->job->plan_id);
 	sgug_jsonw_key(w, "jobId");
 	sgug_jsonw_str(w, r->job->job_id);
-	sgug_jsonw_key(w, "requestId");
-	sgug_jsonw_int(w, r->job->request_id);
-	sgug_jsonw_key(w, "result");
+	sgug_jsonw_key(w, "conclusion");
 	sgug_jsonw_str(w, result_name(result));
+
+	sgug_jsonw_key(w, "stepResults");
+	sgug_jsonw_arr_begin(w);
+	for (i = 0; i < r->job->nsteps; i++) {
+		struct step_state *st = &r->steps[i];
+
+		if (!st->ran)
+			continue;
+
+		sgug_jsonw_obj_begin(w);
+		sgug_jsonw_key(w, "external_id");
+		sgug_jsonw_str(w, st->record_id);
+		sgug_jsonw_key(w, "number");
+		sgug_jsonw_int(w, (int64_t)i + 1);
+		sgug_jsonw_key(w, "name");
+		sgug_jsonw_str(w, r->job->steps[i].display_name);
+		sgug_jsonw_key(w, "status");
+		sgug_jsonw_str(w, "completed");
+		sgug_jsonw_key(w, "conclusion");
+		sgug_jsonw_str(w, result_name(st->result));
+		sgug_jsonw_key(w, "started_at");
+		sgug_jsonw_str(w, st->started);
+		sgug_jsonw_key(w, "completed_at");
+		sgug_jsonw_str(w, st->finished);
+		sgug_jsonw_key(w, "completed_log_url");
+		sgug_jsonw_null(w);
+		sgug_jsonw_key(w, "completed_log_lines");
+		sgug_jsonw_int(w, st->log_lines);
+		sgug_jsonw_key(w, "annotations");
+		sgug_jsonw_arr_begin(w);
+		sgug_jsonw_arr_end(w);
+		sgug_jsonw_obj_end(w);
+	}
+	sgug_jsonw_arr_end(w);
+
+	sgug_jsonw_key(w, "annotations");
+	sgug_jsonw_arr_begin(w);
+	sgug_jsonw_arr_end(w);
+	sgug_jsonw_key(w, "environmentUrl");
+	sgug_jsonw_null(w);
+	sgug_jsonw_key(w, "billingOwnerId");
+	sgug_jsonw_str(w, r->job->billing_owner_id);
 	sgug_jsonw_obj_end(w);
 
 	body = sgug_jsonw_done(w, &len);
@@ -638,14 +709,59 @@ sgug_report_job_finished(sgug_reporter *r, sgug_result result)
 		return -1;
 	}
 
-	sgug_snprintf(url, sizeof(url), "%s/events", r->base);
-	/* 2.0-preview.1 here, not 5.1: the events route is versioned
-	 * separately from the rest of the hub. */
+	/* The run service takes no api-version. */
+	sgug_snprintf(url, sizeof(url), "%scompletejob", r->job->service_url);
 	sgug_snprintf(ctype, sizeof(ctype),
-	    "Content-Type: application/json; charset=utf-8; api-version=%s",
-	    API_EVENTS);
+	    "Content-Type: application/json; charset=utf-8");
 
 	rc = send(r, "POST", url, ctype, body, len, NULL);
 	sgug_jsonw_free(w);
 	return rc;
+}
+
+static void
+probe_endpoints(sgug_reporter *r)
+{
+	static const char *const HUBS[] = { "actions", "Actions", "pipelines" };
+	const char *bases[2];
+	char url[SGUG_MAX_URL];
+	const char *headers[2];
+	char accept[64];
+	size_t b, h;
+
+	bases[0] = r->job->pipelines_url;
+	bases[1] = r->job->service_url;
+
+	sgug_snprintf(accept, sizeof(accept),
+	    "Accept: application/json; api-version=%s", API);
+	headers[0] = r->auth;
+	headers[1] = accept;
+
+	fprintf(stderr, "probe: planId=%s timelineId=%s\n", r->job->plan_id,
+	    r->job->timeline_id);
+
+	for (b = 0; b < 2; b++) {
+		if (bases[b] == NULL || bases[b][0] == '\0')
+			continue;
+		for (h = 0; h < sizeof(HUBS) / sizeof(HUBS[0]); h++) {
+			sgug_http_resp *resp = NULL;
+
+			sgug_snprintf(url, sizeof(url),
+			    "%s_apis/distributedtask/hubs/%s/plans/%s/timelines/%s",
+			    bases[b], HUBS[h], r->job->plan_id,
+			    r->job->timeline_id);
+
+			if (sgug_http_request(r->http, "GET", url, headers, 2,
+			    NULL, 0, TIMEOUT_MS, &resp) == 0) {
+				fprintf(stderr, "probe: %d base=%lu hub=%s\n",
+				    sgug_http_status(resp), (unsigned long)b,
+				    HUBS[h]);
+				sgug_http_resp_free(resp);
+			} else {
+				fprintf(stderr, "probe: transport fail base=%lu "
+				    "hub=%s\n", (unsigned long)b, HUBS[h]);
+			}
+		}
+	}
+	fflush(stderr);
 }

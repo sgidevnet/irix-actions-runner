@@ -139,6 +139,8 @@ sgug_job_parse(const char *text, size_t len, sgug_job *out, char *err,
 	out->job_display_name = sgug_json_string(
 	    sgug_json_get(root, "jobDisplayName"), out->job_name);
 	out->request_id = sgug_json_int(sgug_json_get(root, "requestId"), 0);
+	out->billing_owner_id = sgug_json_string(
+	    sgug_json_get(root, "billingOwnerId"), "");
 
 	if (out->plan_id[0] == '\0' || out->job_id[0] == '\0') {
 		seterr(err, errlen, "job message lacked planId or jobId");
