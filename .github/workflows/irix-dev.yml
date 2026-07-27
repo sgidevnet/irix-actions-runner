@@ -30,6 +30,19 @@ jobs:
           ./out/hello
           file out/hello
 
+      - name: Confinement actually bites
+        run: |
+          echo "nofile: $(ulimit -n)"
+          echo "fsize:  $(ulimit -f)"
+          echo "core:   $(ulimit -c)"
+          echo "cpu:    $(ulimit -t)"
+          echo "--- a 5GB write must fail against the 4GB file cap ---"
+          if dd if=/dev/zero of=big.bin bs=1048576 count=5000 2>/dev/null; then
+            echo "UNEXPECTED: the write was not capped"; rm -f big.bin; exit 1
+          else
+            echo "capped as expected"; rm -f big.bin
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: hello-irix

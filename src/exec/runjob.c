@@ -4,6 +4,7 @@
 #include "exec/job.h"
 #include "exec/step.h"
 #include "proto/report.h"
+#include "sandbox/confine.h"
 #include "version.h"
 
 #include <errno.h>
@@ -168,6 +169,8 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 	sgug_job job;
 	sgug_reporter *rep = NULL;
 	sgug_step_opts sopts;
+	sgug_confine_opts confine;
+	char confdesc[256];
 	struct runctx rc;
 	char *env[MAX_ENV];
 	char workspace[512], temp[512], root[512];
@@ -231,7 +234,13 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 
 	nenv = build_env(&job, cfg, workspace, temp, env, MAX_ENV);
 
+	sgug_confine_defaults(&confine);
+	sgug_confine_describe(&confine, confdesc, sizeof(confdesc));
+	printf("limits    %s\n", confdesc);
+	fflush(stdout);
+
 	memset(&sopts, 0, sizeof(sopts));
+	sopts.confine = &confine;
 	sopts.work_dir = workspace;
 	sopts.temp_dir = temp;
 	sopts.env = env;

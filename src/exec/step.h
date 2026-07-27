@@ -2,6 +2,7 @@
 #define SGUG_EXEC_STEP_H
 
 #include "exec/job.h"
+#include "sandbox/confine.h"
 
 #include <stddef.h>
 
@@ -36,6 +37,10 @@ typedef struct {
 
 	sgug_step_abort_fn abort_cb;
 	void *abort_ctx;
+
+	/* Applied in the child between fork and exec. NULL leaves the step
+	 * unconfined, which is only appropriate for the runner's own helpers. */
+	const sgug_confine_opts *confine;
 } sgug_step_opts;
 
 /*

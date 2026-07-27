@@ -177,6 +177,15 @@ spawn(const char *const *argv, const char *cwd, const sgug_step_opts *opts,
 			}
 		}
 
+		/*
+		 * Confinement goes here, after the descriptors are arranged and
+		 * before the chdir, because a chroot invalidates the path we are
+		 * about to change into.
+		 */
+		if (opts->confine != NULL &&
+		    sgug_confine_apply(opts->confine) != 0)
+			_exit(125);
+
 		if (cwd != NULL && chdir(cwd) != 0) {
 			/* Relative paths are relative to the workspace, per the
 			 * workflow schema. */

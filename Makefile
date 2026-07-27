@@ -2,7 +2,7 @@ UNAME_S := $(shell uname -s)
 
 BUILD   := build
 # Everything except main.c, so each test binary can supply its own entry point.
-LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c src/crypto/*.c src/json/*.c src/proto/*.c src/exec/*.c)
+LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c src/crypto/*.c src/json/*.c src/proto/*.c src/exec/*.c src/sandbox/*.c)
 SRCS      := $(LIB_SRCS) src/main.c
 LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/%.o)
 OBJS      := $(SRCS:%.c=$(BUILD)/%.o)
