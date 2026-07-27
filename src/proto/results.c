@@ -83,9 +83,9 @@ static void
 emit_ids(sgug_jsonw *w, const sgug_job *job, const char *step_id)
 {
 	sgug_jsonw_key(w, "workflow_job_run_backend_id");
-	sgug_jsonw_str(w, job->job_id);
+	sgug_jsonw_str(w, job->backend_job_id);
 	sgug_jsonw_key(w, "workflow_run_backend_id");
-	sgug_jsonw_str(w, job->plan_id);
+	sgug_jsonw_str(w, job->backend_run_id);
 	if (step_id != NULL) {
 		sgug_jsonw_key(w, "step_backend_id");
 		sgug_jsonw_str(w, step_id);
@@ -159,9 +159,9 @@ sgug_results_steps_update(sgug_results *r, const sgug_step_state *steps,
 
 	sgug_jsonw_obj_begin(w);
 	sgug_jsonw_key(w, "workflow_run_backend_id");
-	sgug_jsonw_str(w, r->job->plan_id);
+	sgug_jsonw_str(w, r->job->backend_run_id);
 	sgug_jsonw_key(w, "workflow_job_run_backend_id");
-	sgug_jsonw_str(w, r->job->job_id);
+	sgug_jsonw_str(w, r->job->backend_job_id);
 	sgug_jsonw_key(w, "change_order");
 	sgug_jsonw_int(w, ++r->change_order);
 
@@ -502,9 +502,9 @@ sgug_artifact_upload(sgug_results *r, const char *name, const char *zip_path,
 		return -1;
 	sgug_jsonw_obj_begin(w);
 	sgug_jsonw_key(w, "workflow_run_backend_id");
-	sgug_jsonw_str(w, r->job->plan_id);
+	sgug_jsonw_str(w, r->job->backend_run_id);
 	sgug_jsonw_key(w, "workflow_job_run_backend_id");
-	sgug_jsonw_str(w, r->job->job_id);
+	sgug_jsonw_str(w, r->job->backend_job_id);
 	sgug_jsonw_key(w, "name");
 	sgug_jsonw_str(w, name);
 	sgug_jsonw_key(w, "version");
@@ -584,9 +584,9 @@ sgug_artifact_upload(sgug_results *r, const char *name, const char *zip_path,
 
 	sgug_jsonw_obj_begin(w);
 	sgug_jsonw_key(w, "workflow_run_backend_id");
-	sgug_jsonw_str(w, r->job->plan_id);
+	sgug_jsonw_str(w, r->job->backend_run_id);
 	sgug_jsonw_key(w, "workflow_job_run_backend_id");
-	sgug_jsonw_str(w, r->job->job_id);
+	sgug_jsonw_str(w, r->job->backend_job_id);
 	sgug_jsonw_key(w, "name");
 	sgug_jsonw_str(w, name);
 	sgug_jsonw_key(w, "size");
@@ -633,16 +633,91 @@ sgug_artifact_download(sgug_results *r, const char *name, const char *zip_path,
 		return -1;
 	sgug_jsonw_obj_begin(w);
 	sgug_jsonw_key(w, "workflow_run_backend_id");
-	sgug_jsonw_str(w, r->job->plan_id);
+	sgug_jsonw_str(w, r->job->backend_run_id);
 	sgug_jsonw_key(w, "workflow_job_run_backend_id");
-	sgug_jsonw_str(w, r->job->job_id);
-	sgug_jsonw_key(w, "name");
+	sgug_jsonw_str(w, r->job->backend_job_id);
+	sgug_jsonw_key(w, "name_filter");
 	sgug_jsonw_str(w, name);
 	sgug_jsonw_obj_end(w);
 
 	body = sgug_jsonw_done(w, &body_len);
 	if (body == NULL)
 		goto out;
+
+	/*
+	 * List first, because the signed URL request is scoped to the job that
+	 * uploaded the artifact, not to the job asking for it. A verify job
+	 * asking with its own job id gets "artifact not found" even when the
+	 * run id matches. The listing is scoped to the run and reports which
+	 * job each artifact belongs to.
+	 */
+	if (twirp_at(r, ARTSVC, "ListArtifacts", body, body_len, &resp, err,
+	    errlen) != 0)
+		goto out;
+
+	{
+		size_t rl;
+		const char *rb = sgug_http_body(resp, &rl);
+		const sgug_json *list;
+		const char *owner_job = NULL, *owner_run = NULL;
+		size_t i, n;
+
+		doc = sgug_json_parse(rb, rl, NULL, 0);
+		if (doc == NULL) {
+			seterr(err, errlen, "ListArtifacts returned non-JSON");
+			goto out;
+		}
+
+		list = sgug_json_get(sgug_json_root(doc), "artifacts");
+		n = sgug_json_len(list);
+		for (i = 0; i < n; i++) {
+			const sgug_json *a = sgug_json_at(list, i);
+			const char *an = field(a, "name", "name");
+
+			if (an != NULL && strcmp(an, name) == 0) {
+				owner_job = field(a, "workflow_job_run_backend_id",
+				    "workflowJobRunBackendId");
+				owner_run = field(a, "workflow_run_backend_id",
+				    "workflowRunBackendId");
+				break;
+			}
+		}
+
+		if (owner_job == NULL) {
+			seterr(err, errlen,
+			    "no artifact named \"%s\" in this run", name);
+			goto out;
+		}
+
+		sgug_jsonw_free(w);
+		w = sgug_jsonw_new();
+		if (w == NULL)
+			goto out;
+		sgug_jsonw_obj_begin(w);
+		/*
+		 * Both ids come from the listed artifact, not from our own
+		 * token. The toolkit does the same: the signed URL is scoped to
+		 * whoever uploaded, and a downloader that substitutes its own
+		 * ids gets "artifact not found".
+		 */
+		sgug_jsonw_key(w, "workflow_run_backend_id");
+		sgug_jsonw_str(w, owner_run != NULL ? owner_run
+		    : r->job->backend_run_id);
+		sgug_jsonw_key(w, "workflow_job_run_backend_id");
+		sgug_jsonw_str(w, owner_job);
+		sgug_jsonw_key(w, "name");
+		sgug_jsonw_str(w, name);
+		sgug_jsonw_obj_end(w);
+
+		body = sgug_jsonw_done(w, &body_len);
+		if (body == NULL)
+			goto out;
+	}
+
+	sgug_json_free(doc);
+	doc = NULL;
+	sgug_http_resp_free(resp);
+	resp = NULL;
 
 	if (twirp_at(r, ARTSVC, "GetSignedArtifactURL", body, body_len, &resp,
 	    err, errlen) != 0)
@@ -657,7 +732,7 @@ sgug_artifact_download(sgug_results *r, const char *name, const char *zip_path,
 	url = doc != NULL
 	    ? field(sgug_json_root(doc), "signed_url", "signedUrl") : NULL;
 	if (url == NULL || *url == '\0') {
-		seterr(err, errlen, "no artifact named \"%s\"", name);
+		seterr(err, errlen, "no signed URL for artifact \"%s\"", name);
 		goto out;
 	}
 

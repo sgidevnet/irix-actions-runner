@@ -1,5 +1,6 @@
 #include "exec/job.h"
 
+#include "crypto/b64.h"
 #include "exec/token.h"
 
 #include <stdarg.h>
@@ -131,6 +132,85 @@ parse_step(sgug_step *st, const sgug_json *s)
 	st->timeout_minutes = (int)sgug_json_int(v, 0);
 }
 
+/*
+ * Pulls the results backend ids out of the job token.
+ *
+ * The token is a JWT; its payload carries an scp claim listing scopes
+ * separated by spaces, one of which is
+ * "Actions.Results:<runBackendId>:<jobRunBackendId>".
+ */
+static void
+parse_backend_ids(sgug_job *job)
+{
+	const char *tok = job->access_token;
+	const char *dot1, *dot2;
+	char seg[4096];
+	unsigned char payload[4096];
+	sgug_json_doc *doc;
+	const char *scp, *p;
+	size_t n;
+	int plen;
+
+	if (tok == NULL || *tok == '\0')
+		return;
+
+	dot1 = strchr(tok, '.');
+	if (dot1 == NULL)
+		return;
+	dot2 = strchr(dot1 + 1, '.');
+	if (dot2 == NULL)
+		return;
+
+	n = (size_t)(dot2 - dot1 - 1);
+	if (n == 0 || n >= sizeof(seg))
+		return;
+	memcpy(seg, dot1 + 1, n);
+	seg[n] = '\0';
+
+	plen = sgug_b64_decode(seg, payload, sizeof(payload) - 1);
+	if (plen <= 0)
+		return;
+	payload[plen] = '\0';
+
+	doc = sgug_json_parse((const char *)payload, (size_t)plen, NULL, 0);
+	if (doc == NULL)
+		return;
+
+	scp = sgug_json_string(sgug_json_get(sgug_json_root(doc), "scp"), NULL);
+	for (p = scp; p != NULL && *p != '\0'; ) {
+		static const char PREFIX[] = "Actions.Results:";
+		const char *end = strchr(p, ' ');
+		size_t seglen = end != NULL ? (size_t)(end - p) : strlen(p);
+
+		if (seglen > sizeof(PREFIX) - 1 &&
+		    strncmp(p, PREFIX, sizeof(PREFIX) - 1) == 0) {
+			const char *ids = p + sizeof(PREFIX) - 1;
+			const char *colon = memchr(ids, ':',
+			    seglen - (sizeof(PREFIX) - 1));
+
+			if (colon != NULL) {
+				size_t a = (size_t)(colon - ids);
+				size_t b = seglen - (sizeof(PREFIX) - 1) - a - 1;
+
+				if (a < sizeof(job->backend_run_id) &&
+				    b < sizeof(job->backend_job_id)) {
+					memcpy(job->backend_run_id, ids, a);
+					job->backend_run_id[a] = '\0';
+					memcpy(job->backend_job_id, colon + 1, b);
+					job->backend_job_id[b] = '\0';
+				}
+			}
+			break;
+		}
+
+		if (end == NULL)
+			break;
+		p = end + 1;
+	}
+
+	sgug_json_free(doc);
+}
+
 int
 sgug_job_parse(const char *text, size_t len, sgug_job *out, char *err,
     size_t errlen)
@@ -172,6 +252,16 @@ sgug_job_parse(const char *text, size_t len, sgug_job *out, char *err,
 
 	if (parse_endpoint(out, root, err, errlen) != 0)
 		goto fail;
+
+	parse_backend_ids(out);
+	/* Fall back to the plan and job ids, which is right for a single job
+	 * and is what older deployments used. */
+	if (out->backend_run_id[0] == '\0')
+		sgug_snprintf(out->backend_run_id, sizeof(out->backend_run_id),
+		    "%s", out->plan_id);
+	if (out->backend_job_id[0] == '\0')
+		sgug_snprintf(out->backend_job_id, sizeof(out->backend_job_id),
+		    "%s", out->job_id);
 
 	steps = sgug_json_get(root, "steps");
 	n = sgug_json_len(steps);

@@ -71,6 +71,18 @@ typedef struct {
 	const char *results_url;	/* Twirp results service */
 	const char *billing_owner_id;
 
+	/*
+	 * Backend ids for the results service, taken from the job token's scp
+	 * claim rather than from the plan.
+	 *
+	 * Each job in a run has its own planId, so using that as the run id
+	 * scopes artifacts per job and a later job cannot find what an earlier
+	 * one uploaded. The token carries the real run scope as
+	 * "Actions.Results:<run>:<jobrun>".
+	 */
+	char backend_run_id[64];
+	char backend_job_id[64];
+
 	sgug_step steps[SGUG_JOB_MAX_STEPS];
 	size_t nsteps;
 

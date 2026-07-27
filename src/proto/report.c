@@ -829,10 +829,21 @@ sgug_report_job_finished(sgug_reporter *r, sgug_result result)
 		sgug_jsonw_str(w, "completed");
 		sgug_jsonw_key(w, "conclusion");
 		sgug_jsonw_str(w, result_name(st->result));
-		sgug_jsonw_key(w, "started_at");
-		sgug_jsonw_str(w, st->started);
-		sgug_jsonw_key(w, "completed_at");
-		sgug_jsonw_str(w, st->finished);
+		/*
+		 * Omitted rather than sent empty. A skipped step never started,
+		 * so it has no timestamp, and an empty string fails the
+		 * service's timestamp parse: completejob answers 400, the job
+		 * never completes, and the runner keeps its parallelism slot
+		 * forever. One skipped step was enough to wedge the runner.
+		 */
+		if (st->started[0] != '\0') {
+			sgug_jsonw_key(w, "started_at");
+			sgug_jsonw_str(w, st->started);
+		}
+		if (st->finished[0] != '\0') {
+			sgug_jsonw_key(w, "completed_at");
+			sgug_jsonw_str(w, st->finished);
+		}
 		sgug_jsonw_key(w, "completed_log_url");
 		sgug_jsonw_null(w);
 		sgug_jsonw_key(w, "completed_log_lines");
