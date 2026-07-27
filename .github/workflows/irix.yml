@@ -1,6 +1,6 @@
 name: irix
 
-# Runs on the SGI Octane2 via this repository's own runner.
+# Runs on the SGI Octane2 via this repository own runner.
 #
 # Kept small: it exists to prove the runner executes a job end to
 # end, not to build anything. timeout-minutes is short because a runner that
