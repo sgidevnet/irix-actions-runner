@@ -78,6 +78,53 @@ jobs:
 Available labels: `irix`, `mips`, `mips-n32`, and the machine's model (`octane`, `o2`,
 `fuel`, `tezro`).
 
+## Two ways to use it
+
+The Octane is a 400MHz R12000. Building a large package on it takes hours, while
+cross-compiling the same thing on x86 takes minutes, so the runner is most
+useful when it does the part only real hardware can.
+
+**Verify after a cross-build.** The build runs on a hosted Linux runner, the
+Octane receives the artifact and proves it actually works on IRIX.
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./cross-build.sh          # clang targeting mips-sgi-irix6.5
+      - uses: actions/upload-artifact@v4
+        with: { name: rpms, path: out/ }
+
+  verify:
+    needs: build
+    runs-on: [self-hosted, irix]
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: rpms }
+      - run: ./run-tests.sh
+```
+
+**Build natively.** Slower, but self-contained and closer to how SGUG-RSE
+packages are built by hand today.
+
+```yaml
+jobs:
+  build:
+    runs-on: [self-hosted, irix]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rpmbuild -ba package.spec --nocheck
+```
+
+Both work. The first is what you want for a package set; the second is what you
+want for something small, or when the build itself is what you are testing.
+
+There is no IRIX emulator worth using as a substitute. QEMU has no SGI machine
+model and MAME's Indy emulation does not run 6.5 usefully, so real hardware is
+the only way to know a binary works.
+
 ## Sandboxing
 
 Jobs do not run as the runner. The supervisor stays root and never executes workflow code.
