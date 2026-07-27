@@ -11,11 +11,13 @@ It ships as one self-contained n32 binary. On a stock IRIX box it needs `libc.so
 
 ## Status
 
-Early. Phase 0 is complete: verified TLS 1.3 to `api.github.com` with full certificate
-validation from an Octane2 running IRIX 6.5.30m, statically linked, under both GCC 9.2 and
-MIPSPro 7.4.4m.
+Working. An Octane2 running IRIX 6.5.30m registers, appears online, runs workflow jobs and
+reports results and logs back to GitHub. Verified end to end on that hardware: a job checks
+out the repository, compiles a binary, uploads it as an artifact, and a second job
+downloads and runs it.
 
-Registration and job execution are in progress. This does not run workflows yet.
+Not yet done: live step highlighting while a job runs, and `chroot` confinement is
+implemented but only applies when the runner is started as root.
 
 ## Requirements
 
@@ -41,9 +43,13 @@ make test       # unit tests, also runnable on Linux
 
 Supported:
 
-- `run:` steps, under `bash` or `sh`.
-- `actions/checkout`, implemented natively against the `git` binary.
-- Job and step logs, live console output, timeline status, job cancellation.
+- `run:` steps, under `bash` or `sh`, with per-step status and full logs in the UI.
+- `actions/checkout`, natively against the `git` binary.
+- `actions/upload-artifact` and `actions/download-artifact`, natively, via `zip`.
+- Job cancellation, secret masking in logs, and resource limits on every step.
+
+Steps appear with their results and timing when a job finishes rather than lighting up as
+they run. The log content is complete either way.
 
 Not supported, and will fail with an explicit error rather than hanging:
 
