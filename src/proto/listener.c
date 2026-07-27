@@ -381,6 +381,166 @@ message_delete(const sgug_listener_opts *o, const struct lstate *st,
 }
 
 /*
+ * Turns a RunnerJobRequest reference into the job itself.
+ *
+ * The broker does not carry the job inline; it hands over a request id and the
+ * address of a run service, and the runner claims the job from there. The
+ * response is the same AgentJobRequestMessage the pool flow delivers inline, so
+ * everything downstream sees one shape.
+ *
+ * Returns a malloc'd body on success, NULL otherwise.
+ */
+static char *
+acquire_job(const sgug_listener_opts *o, const struct lstate *st,
+    const char *ref_body, size_t ref_len, char *err, size_t errlen)
+{
+	sgug_json_doc *ref = NULL;
+	sgug_jsonw *w = NULL;
+	sgug_http_resp *r = NULL;
+	char url[SGUG_MAX_URL];
+	char auth[2048];
+	const char *headers[3];
+	const char *rsu, *rid, *bid, *body;
+	size_t body_len;
+	char *out = NULL;
+
+	ref = sgug_json_parse(ref_body, ref_len, NULL, 0);
+	if (ref == NULL) {
+		seterr(err, errlen, "job reference was not JSON");
+		return NULL;
+	}
+
+	rsu = sgug_json_string(
+	    sgug_json_get(sgug_json_root(ref), "run_service_url"), NULL);
+	rid = sgug_json_string(
+	    sgug_json_get(sgug_json_root(ref), "runner_request_id"), NULL);
+	bid = sgug_json_string(
+	    sgug_json_get(sgug_json_root(ref), "billing_owner_id"), "");
+
+	if (rsu == NULL || rid == NULL) {
+		seterr(err, errlen, "job reference lacked run_service_url or "
+		    "runner_request_id");
+		goto out;
+	}
+
+	w = sgug_jsonw_new();
+	if (w == NULL)
+		goto out;
+	sgug_jsonw_obj_begin(w);
+	sgug_jsonw_key(w, "jobMessageId");
+	sgug_jsonw_str(w, rid);
+	sgug_jsonw_key(w, "runnerOS");
+	sgug_jsonw_str(w, "Linux");
+	sgug_jsonw_key(w, "billingOwnerId");
+	sgug_jsonw_str(w, bid);
+	sgug_jsonw_obj_end(w);
+
+	body = sgug_jsonw_done(w, &body_len);
+	if (body == NULL)
+		goto out;
+
+	if (auth_header(o->oauth, auth, sizeof(auth), err, errlen) != 0)
+		goto out;
+
+	headers[0] = auth;
+	headers[1] = "Accept: application/json";
+	headers[2] = "Content-Type: application/json; charset=utf-8";
+
+	sgug_snprintf(url, sizeof(url), "%sacquirejob", rsu);
+
+	if (sgug_http_request(o->http, "POST", url, headers, 3, body, body_len,
+	    SHORT_TIMEOUT_MS, &r) != 0) {
+		seterr(err, errlen, "acquirejob: %s", sgug_http_last_error());
+		goto out;
+	}
+
+	/*
+	 * 404 means the job is gone, 409 that another runner claimed it first,
+	 * 422 that the service will not process it. None are worth retrying,
+	 * and all are normal in a group with more than one runner.
+	 */
+	if (sgug_http_status(r) == 404 || sgug_http_status(r) == 409 ||
+	    sgug_http_status(r) == 422) {
+		seterr(err, errlen, "job no longer available (%d)",
+		    sgug_http_status(r));
+		goto out;
+	}
+	if (sgug_http_status(r) != 200) {
+		seterr(err, errlen, "acquirejob returned %d: %.200s",
+		    sgug_http_status(r), sgug_http_body(r, NULL));
+		goto out;
+	}
+
+	body = sgug_http_body(r, &body_len);
+	out = malloc(body_len + 1);
+	if (out != NULL) {
+		memcpy(out, body, body_len);
+		out[body_len] = '\0';
+	}
+
+out:
+	sgug_http_resp_free(r);
+	sgug_jsonw_free(w);
+	sgug_json_free(ref);
+	return out;
+}
+
+/* Tells the broker we have taken the reference, so it stops redelivering. */
+static void
+acknowledge(const sgug_listener_opts *o, const struct lstate *st,
+    const char *ref_body, size_t ref_len)
+{
+	sgug_json_doc *ref;
+	sgug_jsonw *w;
+	sgug_http_resp *r = NULL;
+	char url[SGUG_MAX_URL];
+	char base[SGUG_MAX_URL];
+	char auth[2048];
+	const char *headers[3];
+	const char *rid, *body;
+	size_t body_len;
+
+	ref = sgug_json_parse(ref_body, ref_len, NULL, 0);
+	if (ref == NULL)
+		return;
+
+	rid = sgug_json_string(
+	    sgug_json_get(sgug_json_root(ref), "runner_request_id"), NULL);
+	if (rid == NULL || st->broker_url[0] == '\0') {
+		sgug_json_free(ref);
+		return;
+	}
+
+	w = sgug_jsonw_new();
+	if (w == NULL) {
+		sgug_json_free(ref);
+		return;
+	}
+	sgug_jsonw_obj_begin(w);
+	sgug_jsonw_key(w, "runnerRequestId");
+	sgug_jsonw_str(w, rid);
+	sgug_jsonw_obj_end(w);
+	body = sgug_jsonw_done(w, &body_len);
+
+	if (body != NULL &&
+	    auth_header(o->oauth, auth, sizeof(auth), NULL, 0) == 0) {
+		headers[0] = auth;
+		headers[1] = "Accept: application/json";
+		headers[2] = "Content-Type: application/json; charset=utf-8";
+
+		broker_url(st, "acknowledge", base, sizeof(base));
+		sgug_snprintf(url, sizeof(url), "%s?sessionId=%s", base, st->s.id);
+
+		if (sgug_http_request(o->http, "POST", url, headers, 3, body,
+		    body_len, SHORT_TIMEOUT_MS, &r) == 0)
+			sgug_http_resp_free(r);
+	}
+
+	sgug_jsonw_free(w);
+	sgug_json_free(ref);
+}
+
+/*
  * One long poll. Returns 1 when a message was dispatched, 0 when the poll
  * returned empty, and -1 on an error the caller should back off from.
  */
@@ -558,6 +718,31 @@ poll_once(const sgug_listener_opts *o, struct lstate *st, int64_t *last_id,
 		sgug_json_free(bd);
 		rc = 1;
 		goto out;
+	}
+
+	if (strcmp(type, "RunnerJobRequest") == 0) {
+		char acq_err[256];
+		char *full;
+
+		acknowledge(o, st, plain, body_len);
+
+		acq_err[0] = '\0';
+		full = acquire_job(o, st, plain, body_len, acq_err,
+		    sizeof(acq_err));
+		if (full == NULL) {
+			seterr(err, errlen, "%s", acq_err);
+			/* Not a transport failure: another runner may simply
+			 * have won the race. Keep listening. */
+			rc = 1;
+			goto out;
+		}
+
+		free(plain);
+		plain = full;
+		body_len = strlen(plain);
+		/* Downstream sees the pool flow's message type, since the
+		 * payload is identical. */
+		type = "PipelineAgentJobRequest";
 	}
 
 	if (o->verbose >= 1) {

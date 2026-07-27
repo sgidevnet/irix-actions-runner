@@ -2,7 +2,7 @@ name: irix
 
 # Runs on the SGI Octane2 via this repository's own runner.
 #
-# Kept deliberately small: it exists to prove the runner executes a job end to
+# Kept small: it exists to prove the runner executes a job end to
 # end, not to build anything. timeout-minutes is short because a runner that
 # accepts a job and then dies would otherwise hold the queue for six hours.
 
