@@ -58,13 +58,21 @@ work to IRIX in a separate job.
 
 ## Runner identity
 
-The runner reports `RUNNER_OS=Linux` and the system labels `self-hosted`, `Linux`, `X64`.
+The runner claims an identity in six places. They are not equally consequential.
 
-`X64` is untrue. GitHub's system label vocabulary has no MIPS value, and real workflows are
-written `runs-on: [self-hosted, linux, x64]`. Claiming it is what makes ordinary workflow
-YAML schedulable here.
+| Reported | Sent at | Consumed by | Effect |
+|---|---|---|---|
+| `Linux` label | registration | `runs-on` matching | Required. Without it `runs-on: [self-hosted, linux]` never schedules here |
+| `X64` label | registration | `runs-on` matching | Required for the usual `runs-on: [self-hosted, linux, x64]` |
+| `irix`, `mips`, `mips-n32`, model | registration | `runs-on` matching | Lets a workflow target this machine on purpose |
+| `osDescription` | registration | runner list in the UI | Display only. Reads `IRIX 6.5 mips` |
+| `runnerOS`, `os=` | `acquirejob`, message poll | nothing | Not validated. A job ran reporting `IRIX` and the service neither rejected nor noticed it |
+| `RUNNER_OS` | each step's environment | `if:` conditions | Changes which branches a workflow takes |
 
-The truthful labels are also advertised, so workflows can target IRIX deliberately:
+Only the first two are untrue. GitHub's system label vocabulary has no MIPS or IRIX value,
+and ordinary workflows are written `runs-on: [self-hosted, linux, x64]`.
+
+Target the machine deliberately with the user labels:
 
 ```yaml
 jobs:
@@ -75,8 +83,14 @@ jobs:
       - run: ./configure && make
 ```
 
-Available labels: `irix`, `mips`, `mips-n32`, and the machine's model (`octane`, `o2`,
-`fuel`, `tezro`).
+Steps can be told the truth independently of the labels:
+
+```sh
+SGUG_RUNNER_OS=IRIX ./runner run
+```
+
+Off by default. When `runner.os == 'Linux'` fails, third-party actions usually fall
+through to their macOS or Windows branch, which fits IRIX worse than the Linux one.
 
 ## Two ways to use it
 
