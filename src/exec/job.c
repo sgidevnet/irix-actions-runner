@@ -93,6 +93,7 @@ parse_step(sgug_step *st, const sgug_json *s)
 		st->kind = SGUG_STEP_ACTION;
 		st->action_name = sgug_json_string(sgug_json_get(ref, "name"), "");
 		st->action_ref = sgug_json_string(sgug_json_get(ref, "ref"), "");
+		st->inputs = inputs;
 	} else {
 		/* containerRegistry and docker: no container runtime exists on
 		 * IRIX, so these are rejected rather than attempted. */
@@ -190,6 +191,20 @@ sgug_job_free(sgug_job *job)
 		return;
 	sgug_json_free(job->doc);
 	memset(job, 0, sizeof(*job));
+}
+
+const char *
+sgug_job_variable(const sgug_job *job, const char *name, const char *fallback)
+{
+	const sgug_json *v;
+
+	if (job == NULL || job->doc == NULL)
+		return fallback;
+
+	v = sgug_json_get(
+	    sgug_json_get(sgug_json_root(job->doc), "variables"), name);
+
+	return sgug_json_string(sgug_json_get(v, "value"), fallback);
 }
 
 const char *

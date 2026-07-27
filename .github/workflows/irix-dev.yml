@@ -16,6 +16,14 @@ jobs:
     runs-on: [self-hosted, octane-t1]
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the checkout
+        run: |
+          pwd
+          git log --oneline -1
+          ls README.md Makefile
+
       - name: Identify the machine
         run: |
           uname -a

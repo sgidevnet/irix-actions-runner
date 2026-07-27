@@ -127,33 +127,24 @@ drain_lines(char *buf, size_t len, sgug_step_output_fn on_line, void *ctx)
 	return start >= len ? 0 : len - start;
 }
 
-int
-sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
+/*
+ * Forks argv, streams its combined output a line at a time, and returns the
+ * exit status. Shared by shell steps and by action handlers, which differ only
+ * in what they put in argv.
+ */
+static int
+spawn(const char *const *argv, const char *cwd, const sgug_step_opts *opts,
     sgug_step_output_fn on_line, void *ctx, char *err, size_t errlen)
 {
-	char script_path[512];
 	char buf[LINE_MAX_LEN];
-	const char *shell;
 	int pipefd[2];
 	pid_t pid;
 	size_t held = 0;
 	int64_t deadline;
 	int status = 0, killed = 0, rc = -1;
 
-	if (step->script == NULL || *step->script == '\0') {
-		/* An empty script is a no-op, not a failure. */
-		return 0;
-	}
-
-	if (write_script(opts->temp_dir, step->script, script_path,
-	    sizeof(script_path), err, errlen) != 0)
-		return -1;
-
-	shell = resolve_shell(step->shell != NULL ? step->shell : opts->shell);
-
 	if (pipe(pipefd) != 0) {
 		seterr(err, errlen, "pipe: %s", strerror(errno));
-		unlink(script_path);
 		return -1;
 	}
 
@@ -162,14 +153,10 @@ sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
 		seterr(err, errlen, "fork: %s", strerror(errno));
 		close(pipefd[0]);
 		close(pipefd[1]);
-		unlink(script_path);
 		return -1;
 	}
 
 	if (pid == 0) {
-		char *argv[3];
-		const char *dir;
-
 		close(pipefd[0]);
 
 		/* Both streams go to the caller interleaved, which is what the
@@ -190,25 +177,19 @@ sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
 			}
 		}
 
-		dir = step->working_directory != NULL &&
-		    *step->working_directory != '\0'
-		    ? step->working_directory : opts->work_dir;
-		if (dir != NULL && chdir(dir) != 0) {
-			/* Relative to the workspace, per the workflow schema. */
-			if (chdir(opts->work_dir) != 0 ||
-			    (step->working_directory != NULL &&
-			    chdir(step->working_directory) != 0))
+		if (cwd != NULL && chdir(cwd) != 0) {
+			/* Relative paths are relative to the workspace, per the
+			 * workflow schema. */
+			if (opts->work_dir == NULL || chdir(opts->work_dir) != 0 ||
+			    chdir(cwd) != 0)
 				_exit(127);
 		}
 
-		argv[0] = (char *)shell;
-		argv[1] = script_path;
-		argv[2] = NULL;
-
 		if (opts->env != NULL)
-			execve(shell, argv, (char *const *)opts->env);
+			execve(argv[0], (char *const *)argv,
+			    (char *const *)opts->env);
 		else
-			execv(shell, argv);
+			execv(argv[0], (char *const *)argv);
 		_exit(127);
 	}
 
@@ -291,8 +272,6 @@ sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
 			break;
 	}
 
-	unlink(script_path);
-
 	if (killed)
 		return SGUG_STEP_ABORTED;
 
@@ -303,5 +282,84 @@ sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
 	else
 		rc = 1;
 
+	return rc;
+}
+
+/* Resolves a bare program name against the PATH the step will see. */
+static int
+which(const char *prog, const sgug_step_opts *opts, char *out, size_t outlen)
+{
+	static const char *const DIRS[] = {
+		"/usr/sgug/bin", "/usr/bin", "/bin", "/usr/sbin", "/usr/bsd"
+	};
+	size_t i;
+
+	if (strchr(prog, '/') != NULL) {
+		sgug_snprintf(out, outlen, "%s", prog);
+		return access(out, X_OK) == 0 ? 0 : -1;
+	}
+
+	(void)opts;
+	for (i = 0; i < sizeof(DIRS) / sizeof(DIRS[0]); i++) {
+		sgug_snprintf(out, outlen, "%s/%s", DIRS[i], prog);
+		if (access(out, X_OK) == 0)
+			return 0;
+	}
+	return -1;
+}
+
+int
+sgug_run_argv(const char *const *argv, const char *cwd,
+    const sgug_step_opts *opts, sgug_step_output_fn on_line, void *ctx,
+    char *err, size_t errlen)
+{
+	const char *resolved[64];
+	char path[512];
+	size_t n;
+
+	if (argv == NULL || argv[0] == NULL)
+		return -1;
+
+	if (which(argv[0], opts, path, sizeof(path)) != 0) {
+		seterr(err, errlen, "%s not found", argv[0]);
+		return -1;
+	}
+
+	resolved[0] = path;
+	for (n = 1; argv[n] != NULL && n < sizeof(resolved) / sizeof(resolved[0]) - 1; n++)
+		resolved[n] = argv[n];
+	resolved[n] = NULL;
+
+	return spawn(resolved, cwd != NULL ? cwd : opts->work_dir, opts, on_line,
+	    ctx, err, errlen);
+}
+
+int
+sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
+    sgug_step_output_fn on_line, void *ctx, char *err, size_t errlen)
+{
+	const char *argv[3];
+	char script_path[512];
+	const char *cwd;
+	int rc;
+
+	if (step->script == NULL || *step->script == '\0') {
+		/* An empty script is a no-op, not a failure. */
+		return 0;
+	}
+
+	if (write_script(opts->temp_dir, step->script, script_path,
+	    sizeof(script_path), err, errlen) != 0)
+		return -1;
+
+	argv[0] = resolve_shell(step->shell != NULL ? step->shell : opts->shell);
+	argv[1] = script_path;
+	argv[2] = NULL;
+
+	cwd = step->working_directory != NULL && *step->working_directory != '\0'
+	    ? step->working_directory : opts->work_dir;
+
+	rc = spawn(argv, cwd, opts, on_line, ctx, err, errlen);
+	unlink(script_path);
 	return rc;
 }

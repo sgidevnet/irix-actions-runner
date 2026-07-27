@@ -59,4 +59,19 @@ int sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
  */
 int sgug_step_should_run(const char *condition, int job_failed, int job_cancelled);
 
+/*
+ * Runs a program directly from an argv array, with no shell.
+ *
+ * Handlers use this rather than building a command line. A checkout puts an
+ * installation token in a git config value, and passing that through a shell
+ * would mean quoting a secret correctly every time, forever. argv has no
+ * quoting to get wrong.
+ *
+ * argv[0] is the program, found on the opts PATH if it has no slash. Returns
+ * the exit status, or -1 if it could not be started.
+ */
+int sgug_run_argv(const char *const *argv, const char *cwd,
+    const sgug_step_opts *opts, sgug_step_output_fn on_line, void *ctx,
+    char *err, size_t errlen);
+
 #endif /* SGUG_EXEC_STEP_H */

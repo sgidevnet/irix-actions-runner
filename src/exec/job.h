@@ -36,6 +36,9 @@ typedef struct {
 	/* SGUG_STEP_ACTION */
 	const char *action_name;	/* e.g. actions/checkout */
 	const char *action_ref;		/* e.g. v4 */
+	/* The step's `with:` block, for a handler to read. Still a
+	 * TemplateToken, so read it with the exec/token.h accessors. */
+	const sgug_json *inputs;
 
 	int continue_on_error;
 	int timeout_minutes;		/* 0 when unset */
@@ -89,5 +92,12 @@ void sgug_job_free(sgug_job *job);
  */
 const char *sgug_job_context(const sgug_job *job, const char *context,
     const char *key, const char *fallback);
+
+/*
+ * A job variable, e.g. "github_token". Secrets live here rather than in the
+ * contexts, and the installation token a checkout needs is one of them.
+ */
+const char *sgug_job_variable(const sgug_job *job, const char *name,
+    const char *fallback);
 
 #endif /* SGUG_EXEC_JOB_H */

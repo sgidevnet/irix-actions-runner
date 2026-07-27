@@ -1,5 +1,6 @@
 #include "exec/runjob.h"
 
+#include "exec/handlers.h"
 #include "exec/job.h"
 #include "exec/step.h"
 #include "proto/report.h"
@@ -269,30 +270,43 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 		sgug_report_step_started(rep, i);
 		rc.step = i;
 
-		if (st->kind != SGUG_STEP_SCRIPT) {
-			/*
-			 * uses: steps need a native handler, and none exist
-			 * yet. Failing loudly beats appearing to succeed.
-			 */
+		sopts.abort_cb = should_abort;
+		sopts.abort_ctx = &rc;
+		steperr[0] = '\0';
+
+		if (st->kind == SGUG_STEP_ACTION) {
+			sgug_action_fn h = sgug_action_lookup(st->action_name);
+
+			if (h == NULL) {
+				char msg[320];
+
+				sgug_snprintf(msg, sizeof(msg),
+				    "%s has no native handler. This runner has "
+				    "no JavaScript engine, so only these are "
+				    "supported: %s",
+				    st->action_name, sgug_action_supported());
+				on_line(&rc, msg);
+				sgug_report_step_finished(rep, i,
+				    SGUG_RESULT_FAILED);
+				failed = 1;
+				continue;
+			}
+			status = h(&job, st, &sopts, on_line, &rc, steperr,
+			    sizeof(steperr));
+		} else if (st->kind != SGUG_STEP_SCRIPT) {
 			char msg[256];
 
 			sgug_snprintf(msg, sizeof(msg),
-			    "unsupported step: %s is not a run: step. This "
-			    "runner has no JavaScript engine, so `uses:` "
-			    "requires a native handler.",
-			    st->action_name != NULL ? st->action_name : "action");
+			    "container and docker steps cannot run on IRIX: "
+			    "there is no container runtime");
 			on_line(&rc, msg);
 			sgug_report_step_finished(rep, i, SGUG_RESULT_FAILED);
 			failed = 1;
 			continue;
+		} else {
+			status = sgug_step_run(st, &sopts, on_line, &rc, steperr,
+			    sizeof(steperr));
 		}
-
-		sopts.abort_cb = should_abort;
-		sopts.abort_ctx = &rc;
-
-		steperr[0] = '\0';
-		status = sgug_step_run(st, &sopts, on_line, &rc, steperr,
-		    sizeof(steperr));
 
 		sgug_report_flush(rep);
 
