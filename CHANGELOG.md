@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - TCP and TLS transport, verified against api.github.com from IRIX 6.5.30m
 - JSON parser with case-insensitive lookup, and a streaming writer
 - HTTP/1.1 client with keep-alive, chunked decoding, redirects and clock-skew measurement
+- Native actions/checkout handler using the git binary
 - Job execution: run: steps, per-step status, and full logs via the results service
 - Listener: OAuth tokens, agent session, long poll, message decrypt, v2 broker migration
 - Runner registration and config persistence (`.runner`, `.credentials`, `.rsakey`)

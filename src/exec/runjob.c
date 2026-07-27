@@ -223,15 +223,7 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 
 	printf("job       %s (%lu steps)\n", job.job_display_name,
 	    (unsigned long)job.nsteps);
-	if (job.nsteps == 0 && getenv("SGUG_DUMP_EMPTY") != NULL) {
-		FILE *f = fopen("/tmp/empty-job.json", "wb");
 
-		if (f != NULL) {
-			fwrite(message, 1, message_len, f);
-			fclose(f);
-			printf("          zero steps, message saved\n");
-		}
-	}
 	fflush(stdout);
 
 	sgug_report_begin(rep);

@@ -23,6 +23,7 @@ typedef enum {
 
 typedef struct {
 	const char *id;
+	/* Points either into the document or at label_buf below. */
 	const char *display_name;
 	const char *context_name;	/* the step's id:, or __run, __run_2 */
 	const char *condition;		/* success(), always(), ... */
@@ -42,6 +43,11 @@ typedef struct {
 
 	int continue_on_error;
 	int timeout_minutes;		/* 0 when unset */
+
+	/* Backs display_name for `uses:` steps, which carry no
+	 * displayNameToken and would otherwise show their generated context
+	 * name. Per step, not shared. */
+	char label_buf[128];
 } sgug_step;
 
 typedef struct {

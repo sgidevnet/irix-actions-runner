@@ -89,8 +89,14 @@ action_checkout(const sgug_job *job, const sgug_step *step,
 {
 	char url[512];
 	char header[1024];
-	char authval[768];
-	char basic[512];
+	/*
+	 * Sized for the installation token, which is a ghs_ value of roughly
+	 * 380 characters. With the "x-access-token:" prefix that base64 encodes
+	 * to about 525 bytes, so a 512 byte buffer fails by a margin small
+	 * enough to look like something else.
+	 */
+	char authval[1024];
+	char basic[1536];
 	char depthbuf[32];
 	const char *repo, *ref, *sha, *token, *server;
 	const char *depth, *path, *persist;
@@ -163,7 +169,7 @@ action_checkout(const sgug_job *job, const sgug_step *step,
 		    "http.%s/.extraheader", server);
 
 		{
-			char hv[600];
+			char hv[1700];
 
 			sgug_snprintf(hv, sizeof(hv), "AUTHORIZATION: basic %s",
 			    basic);

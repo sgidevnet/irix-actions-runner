@@ -67,7 +67,7 @@ parse_step(sgug_step *st, const sgug_json *s)
 	st->condition = sgug_json_string(sgug_json_get(s, "condition"),
 	    "success()");
 	st->display_name = sgug_token_str(sgug_json_get(s, "displayNameToken"),
-	    st->context_name);
+	    NULL);
 
 	ref = sgug_json_get(s, "reference");
 	reftype = sgug_json_string(sgug_json_get(ref, "type"), "");
@@ -99,6 +99,28 @@ parse_step(sgug_step *st, const sgug_json *s)
 		 * IRIX, so these are rejected rather than attempted. */
 		st->kind = SGUG_STEP_UNSUPPORTED;
 		st->action_name = reftype;
+	}
+
+	/*
+	 * A `uses:` step carries no displayNameToken, so without this it shows
+	 * as its generated context name, __actions_checkout. The official
+	 * runner labels it "Run owner/action@ref".
+	 */
+	if (st->display_name == NULL || *st->display_name == '\0') {
+		if (st->kind == SGUG_STEP_ACTION && st->action_name != NULL &&
+		    *st->action_name != '\0') {
+			if (st->action_ref != NULL && *st->action_ref != '\0')
+				sgug_snprintf(st->label_buf,
+				    sizeof(st->label_buf), "Run %s@%s",
+				    st->action_name, st->action_ref);
+			else
+				sgug_snprintf(st->label_buf,
+				    sizeof(st->label_buf), "Run %s",
+				    st->action_name);
+			st->display_name = st->label_buf;
+		} else {
+			st->display_name = st->context_name;
+		}
 	}
 
 	v = sgug_json_get(s, "continueOnError");
