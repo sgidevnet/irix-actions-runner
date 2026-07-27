@@ -9,3 +9,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Build system for GCC 9.2 and a MIPSPro compile gate
 - IRIX compatibility layer covering libc gaps and the `_rld_new_interface` stub
 - TCP and TLS transport, verified against api.github.com from IRIX 6.5.30m
+- Crypto layer: base64 and base64url, AES-256-CBC message decryption, RSA-2048
+  keygen and wire encoding, RS256 and PS256 signing, RSA-OAEP session key
+  recovery, and the OAuth client assertion

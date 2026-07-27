@@ -1,12 +1,13 @@
 UNAME_S := $(shell uname -s)
 
 BUILD   := build
-# Everything except main.c, so the test binary can supply its own entry point.
-LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c)
+# Everything except main.c, so each test binary can supply its own entry point.
+LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c src/crypto/*.c)
 SRCS      := $(LIB_SRCS) src/main.c
 LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/%.o)
 OBJS      := $(SRCS:%.c=$(BUILD)/%.o)
 TEST_SRCS := $(wildcard test/*.c)
+TEST_BINS := $(TEST_SRCS:test/%.c=$(BUILD)/%)
 
 WARNS   := -Wall -Wextra -Wno-unused-parameter
 
@@ -22,8 +23,12 @@ CFLAGS  := -std=c99 -O2 $(WARNS) -mabi=n32 -mabicalls \
 LIBS    := $(SGUG)/lib32/libssl.a $(SGUG)/lib32/libcrypto.a $(SGUG)/lib32/libz.a -pthread
 LDFLAGS := -Wl,-rpath,/usr/lib32
 else
+# Development and unit-test host. IRIX ships OpenSSL 1.1.1d and that is the API
+# the sources target; pinning the compatibility level here keeps one code path
+# instead of forking it for whatever version the dev box happens to have.
 CC      ?= gcc
-CFLAGS  := -std=c99 -O2 -g $(WARNS) -D_GNU_SOURCE -Isrc
+CFLAGS  := -std=c99 -O2 -g $(WARNS) -D_GNU_SOURCE -Isrc \
+           -DOPENSSL_API_COMPAT=0x10100000L -DOPENSSL_SUPPRESS_DEPRECATED
 LIBS    := -lssl -lcrypto -pthread
 LDFLAGS :=
 endif
@@ -63,12 +68,12 @@ else
 	@echo "skip: MIPSPro check needs IRIX"
 endif
 
-test: $(BUILD)/run_tests
-	@$(BUILD)/run_tests
+test: $(TEST_BINS)
+	@for t in $(TEST_BINS); do $$t || exit 1; done
 
-$(BUILD)/run_tests: $(TEST_SRCS) $(LIB_OBJS)
+$(BUILD)/%: test/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIB_OBJS) $(LIBS)
 
 clean:
 	rm -rf $(BUILD)
