@@ -123,7 +123,7 @@ build_env(const sgug_job *job, const sgug_config *cfg, const char *workspace,
 
 	/* Claimed as Linux so ordinary workflow conditionals behave. The truth
 	 * is in the runner labels. */
-	env[n++] = envdup("RUNNER_OS", "Linux");
+	env[n++] = envdup("RUNNER_OS", sgug_runner_os());
 	env[n++] = envdup("RUNNER_ARCH", "X64");
 	env[n++] = envdup("RUNNER_NAME", cfg->agent_name);
 	env[n++] = envdup("RUNNER_TEMP", temp);

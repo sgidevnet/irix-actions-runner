@@ -153,6 +153,28 @@ Other differences from the reference:
   locally.
 - `messageType` on the acquired message stays `RunnerJobRequest`.
 
+### The claimed OS is barely checked
+
+The runner reports an OS in three places, and only one of them matters.
+
+`runnerOS` in the `acquirejob` body and `os=` in the message poll query are
+**not validated**. Sending `IRIX` for both was tested against the live service:
+the job was dispatched normally, ran, and completed successfully. Nothing
+rejected it and nothing behaved differently.
+
+What does matter is the **`Linux` system label** recorded at registration. That
+is what `runs-on: [self-hosted, linux, x64]` matches against, server side, so
+dropping it makes ordinary workflow YAML stop scheduling here.
+
+`RUNNER_OS`, and the `runner` context generally, are ours to choose:
+`contextData.runner` arrives null and the runner synthesises it.
+
+So the honest configuration is to keep the `Linux` label for schedulability
+while telling steps the truth, which `SGUG_RUNNER_OS=IRIX` does. The reason not
+to make that the default is third-party composite actions: a
+`runner.os == 'Linux'` test that fails usually falls through to macOS or
+Windows handling, which is further from correct than the Linux path.
+
 ### Reporting: the timeline API is gone
 
 This is the single biggest divergence from the reference material, and it is

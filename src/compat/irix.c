@@ -1,4 +1,5 @@
 #include "compat/irix.h"
+#include "version.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -39,6 +40,14 @@ sgug_snprintf(char *buf, size_t size, const char *fmt, ...)
 	n = sgug_vsnprintf(buf, size, fmt, ap);
 	va_end(ap);
 	return n;
+}
+
+const char *
+sgug_runner_os(void)
+{
+	const char *o = getenv("SGUG_RUNNER_OS");
+
+	return o != NULL && *o != '\0' ? o : "Linux";
 }
 
 int

@@ -462,7 +462,7 @@ acquire_job(const sgug_listener_opts *o, const struct lstate *st,
 	sgug_jsonw_key(w, "jobMessageId");
 	sgug_jsonw_str(w, rid);
 	sgug_jsonw_key(w, "runnerOS");
-	sgug_jsonw_str(w, "Linux");
+	sgug_jsonw_str(w, sgug_runner_os());
 	sgug_jsonw_key(w, "billingOwnerId");
 	sgug_jsonw_str(w, bid);
 	sgug_jsonw_obj_end(w);
@@ -606,8 +606,8 @@ poll_once(const sgug_listener_opts *o, struct lstate *st, int64_t *last_id,
 		headers[1] = "Accept: application/json";
 		sgug_snprintf(url, sizeof(url),
 		    "%s?sessionId=%s&status=Online&runnerVersion=%s"
-		    "&os=Linux&architecture=X64&disableUpdate=true",
-		    base, s->id, SGUG_RUNNER_VERSION);
+		    "&os=%s&architecture=X64&disableUpdate=true",
+		    base, s->id, SGUG_RUNNER_VERSION, sgug_runner_os());
 	} else {
 		sgug_snprintf(url, sizeof(url),
 		    "%s_apis/distributedtask/pools/%ld/messages?sessionId=%s"

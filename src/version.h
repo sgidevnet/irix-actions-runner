@@ -13,4 +13,19 @@
 #define SGUG_USER_AGENT \
 	"irix-actions-runner/" SGUG_RUNNER_VERSION " (IRIX; mips)"
 
+/*
+ * The OS this runner claims to be.
+ *
+ * "Linux" by default and deliberately untrue. GitHub's system label vocabulary
+ * has no MIPS or IRIX value, and ordinary workflow YAML says
+ * `runs-on: [self-hosted, linux, x64]` and branches on
+ * `runner.os == 'Linux'`, so claiming Linux is what makes existing workflows
+ * schedulable and behave.
+ *
+ * Override with SGUG_RUNNER_OS to find out what the service does with an
+ * honest answer. It appears in the acquirejob request, the message poll query
+ * and the RUNNER_OS variable given to steps.
+ */
+const char *sgug_runner_os(void);
+
 #endif /* SGUG_VERSION_H */
