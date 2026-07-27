@@ -41,6 +41,34 @@ sgug_snprintf(char *buf, size_t size, const char *fmt, ...)
 	return n;
 }
 
+int
+sgug_i64toa(int64_t v, char *out, size_t outlen)
+{
+	char tmp[24];
+	uint64_t mag;
+	int neg = v < 0;
+	size_t n = 0, i;
+
+	/* Accumulate the magnitude unsigned: negating INT64_MIN overflows. */
+	mag = neg ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+
+	do {
+		tmp[n++] = (char)('0' + (int)(mag % 10));
+		mag /= 10;
+	} while (mag != 0);
+
+	if (neg)
+		tmp[n++] = '-';
+
+	if (outlen < n + 1)
+		return -1;
+
+	for (i = 0; i < n; i++)
+		out[i] = tmp[n - 1 - i];
+	out[n] = '\0';
+	return (int)n;
+}
+
 static const char *const MONTHS[12] = {
 	"Jan", "Feb", "Mar", "Apr", "May", "Jun",
 	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec"

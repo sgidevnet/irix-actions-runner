@@ -47,6 +47,7 @@ sgug_jwt_client_assertion(const sgug_rsa *key, const char *client_id,
 	char header[64];
 	char payload[768];
 	char jti[40];
+	char nbfbuf[24], expbuf[24];
 	unsigned char sig[SIG_MAX];
 	sgug_time_t nbf, exp;
 	int n, siglen, used = 0;
@@ -69,13 +70,15 @@ sgug_jwt_client_assertion(const sgug_rsa *key, const char *client_id,
 		return -1;
 	out[used++] = '.';
 
-	/* %ld on the times: sgug_time_t is int64 but these values are well
-	 * inside long on both hosts until 2038, and long is what IRIX printf
-	 * understands without the C99 length modifiers it mishandles. */
+	/* Formatted separately rather than with a printf length modifier: long
+	 * is 32 bits under n32, so these would wrap in 2038. */
+	sgug_i64toa(nbf, nbfbuf, sizeof(nbfbuf));
+	sgug_i64toa(exp, expbuf, sizeof(expbuf));
+
 	n = sgug_snprintf(payload, sizeof(payload),
 	    "{\"iss\":\"%s\",\"sub\":\"%s\",\"aud\":\"%s\","
-	    "\"jti\":\"%s\",\"nbf\":%ld,\"exp\":%ld}",
-	    client_id, client_id, audience, jti, (long)nbf, (long)exp);
+	    "\"jti\":\"%s\",\"nbf\":%s,\"exp\":%s}",
+	    client_id, client_id, audience, jti, nbfbuf, expbuf);
 
 	n = sgug_b64url_encode(payload, (size_t)n, out + used, outlen - (size_t)used);
 	if (n < 0)

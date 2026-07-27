@@ -2,7 +2,7 @@ UNAME_S := $(shell uname -s)
 
 BUILD   := build
 # Everything except main.c, so each test binary can supply its own entry point.
-LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c src/crypto/*.c)
+LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c src/crypto/*.c src/json/*.c)
 SRCS      := $(LIB_SRCS) src/main.c
 LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/%.o)
 OBJS      := $(SRCS:%.c=$(BUILD)/%.o)
@@ -14,9 +14,12 @@ WARNS   := -Wall -Wextra -Wno-unused-parameter
 ifeq ($(UNAME_S),IRIX64)
 SGUG    := /usr/sgug
 CC      := $(SGUG)/bin/gcc
+# -Isrc must precede the SGUG include dir. SGUG ships JsonCpp at
+# /usr/sgug/include/json/json.h, which collides with our own json/json.h; with
+# the order reversed, MIPSPro pulls in the C++ header and dies on <cstddef>.
 CFLAGS  := -std=c99 -O2 $(WARNS) -mabi=n32 -mabicalls \
            -D_SGI_SOURCE -D_SGI_MP_SOURCE -D_SGI_REENTRANT_FUNCTIONS \
-           -I$(SGUG)/include -Isrc
+           -Isrc -I$(SGUG)/include
 # Static OpenSSL keeps the binary self-contained on machines without SGUG-RSE.
 # -lz is required: SGUG builds OpenSSL with zlib. MIPSPro's ld32 dies with an
 # internal error on these archives, so GNU ld does all linking.
@@ -60,7 +63,7 @@ ifeq ($(UNAME_S),IRIX64)
 	  PATH=/usr/bin:/bin /usr/bin/c99 -n32 -O2 -c \
 	    -o $(BUILD)/mipspro/check.o \
 	    -D_SGI_SOURCE -D_SGI_MP_SOURCE -D_SGI_REENTRANT_FUNCTIONS \
-	    -I/usr/sgug/include -Isrc $$f || exit 1; \
+	    -Isrc -I/usr/sgug/include $$f || exit 1; \
 	done
 	@rm -rf $(BUILD)/mipspro
 	@echo "ok: MIPSPro c99 clean"

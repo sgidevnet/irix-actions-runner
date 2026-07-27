@@ -72,6 +72,18 @@ void sgug_format_iso8601(sgug_time_t t, char *out, size_t outlen);
 int sgug_snprintf(char *buf, size_t size, const char *fmt, ...);
 int sgug_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 
+/*
+ * Formats a signed 64-bit value as decimal. Returns bytes written, or -1 if
+ * out is too small; 21 bytes is always enough.
+ *
+ * Not printf. Under the n32 ABI `long` is 32 bits, so "%ld" silently truncates
+ * anything wider: the protocol's messageId of 1234567890123 comes back as
+ * 1912276171, its low 32 bits. "%lld" would be the portable spelling, but IRIX
+ * libc already mishandles the C99 length modifiers badly enough that "%z"
+ * corrupts varargs outright, so this does not rely on any of them.
+ */
+int sgug_i64toa(int64_t v, char *out, size_t outlen);
+
 #if defined(__sgi)
 
 /*

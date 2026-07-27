@@ -54,12 +54,19 @@ produces runtime crashes, not compile errors.
    at first use, not at link time. Use `pthread_key_create`.
 3. **Link `-pthread`, never `-lpthread`, and never both.** See sgug-rse issues #12 and #13.
 4. **Never handle, block or unblock signals 47 and 48.** libpthread reserves them.
-5. `vsnprintf(NULL, 0, ...)` returns -1. Do not use it to size buffers.
-6. `mode_t` is `unsigned long`. Format with `%lo`.
-7. No `MAP_ANON`, no `O_NOFOLLOW`, no `*at` family, no `posix_spawn`.
-8. `time_t` is 32-bit in every IRIX ABI and wraps in 2038. Use `int64_t` internally and
+5. **`long` is 32 bits under n32.** Never format an `int64_t` with `%ld`; it silently
+   drops the high word, and the protocol's `messageId` really is 64-bit. Use
+   `sgug_i64toa`, which avoids printf length modifiers entirely rather than trusting
+   `%lld` on a libc that already mishandles `%z`.
+6. **`-Isrc` must precede `-I/usr/sgug/include`.** SGUG ships JsonCpp at
+   `/usr/sgug/include/json/json.h`, which collides with ours. With the order reversed
+   MIPSPro pulls in the C++ header and dies on `<cstddef>`.
+7. `vsnprintf(NULL, 0, ...)` returns -1. Do not use it to size buffers.
+8. `mode_t` is `unsigned long`. Format with `%lo`.
+9. No `MAP_ANON`, no `O_NOFOLLOW`, no `*at` family, no `posix_spawn`.
+10. `time_t` is 32-bit in every IRIX ABI and wraps in 2038. Use `int64_t` internally and
    narrow only at syscall boundaries.
-9. Missing from IRIX libc, supply via `src/compat/`: `strnlen`, `memmem`, `strcasestr`,
+11. Missing from IRIX libc, supply via `src/compat/`: `strnlen`, `memmem`, `strcasestr`,
    `asprintf`, `getline`, `setenv`, `unsetenv`, `timegm`, `mkdtemp`, `strerror_r`,
    `getopt_long`, `explicit_bzero`.
 

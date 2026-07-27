@@ -1,6 +1,6 @@
 #include "compat/irix.h"
-#include "net/tcp.h"
-#include "net/tls.h"
+#include "json/json.h"
+#include "net/http.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,119 +8,111 @@
 
 /*
  * Reported to the Actions service at registration. The service enforces a
- * minimum and will refuse an older runner, so this tracks GitHub's current
- * release rather than our own progress. Bump when the floor rises.
+ * minimum and refuses an older runner, so this tracks GitHub's current release
+ * rather than our own progress. Bump when the floor rises.
  */
 #define RUNNER_VERSION "2.336.0"
+
+#define USER_AGENT "irix-actions-runner/" RUNNER_VERSION " (IRIX; mips)"
 
 static int
 usage(void)
 {
 	fputs("usage: runner <command>\n"
 	      "\n"
-	      "  selftest [host]   check TLS reachability, certificates and clock\n"
+	      "  selftest [host]   check TLS, certificates, HTTP and clock\n"
 	      "  version           print the reported runner version\n",
 	      stderr);
 	return 2;
 }
 
 /*
- * Everything the runner needs from the network, end to end, with the failures
- * separated. On a freshly imaged IRIX box the usual causes are an expired CA
- * bundle and an unset clock, and both produce confusing errors much later
- * during OAuth if not caught here.
+ * Everything the runner needs from the network, end to end, with the failure
+ * modes separated. On a freshly imaged IRIX box the usual causes are an expired
+ * CA bundle and an undisciplined clock, and both otherwise surface much later
+ * as an unexplained 401 during OAuth.
  */
 static int
 selftest(const char *host)
 {
-	sgug_tls_ctx *ctx;
-	sgug_tls *tls;
-	sgug_time_t local, remote;
-	char req[256];
-	char buf[4096];
-	int fd, n, len;
-	char *date;
+	sgug_http_client *c;
+	sgug_http_resp *r;
+	sgug_json_doc *doc;
+	char url[512];
+	const char *server, *date, *body;
+	sgug_time_t skew;
+	size_t body_len;
+	int rc = 1;
 
 	printf("host      %s\n", host);
 
-	ctx = sgug_tls_ctx_new(NULL);
-	if (ctx == NULL) {
-		fprintf(stderr, "tls context: %s\n", sgug_tls_last_error());
+	c = sgug_http_client_new(NULL, USER_AGENT);
+	if (c == NULL) {
+		fprintf(stderr, "client: %s\n", sgug_http_last_error());
 		return 1;
 	}
 
-	fd = sgug_tcp_connect(host, 443, 15000);
-	if (fd < 0) {
-		fprintf(stderr, "connect %s:443 failed\n", host);
-		sgug_tls_ctx_free(ctx);
-		return 1;
-	}
-	sgug_tcp_set_nodelay(fd);
-	sgug_tcp_set_timeouts(fd, 30000, 30000);
+	sgug_snprintf(url, sizeof(url), "https://%s/", host);
 
-	tls = sgug_tls_connect(ctx, fd, host);
-	if (tls == NULL) {
-		fprintf(stderr, "handshake: %s\n", sgug_tls_last_error());
-		sgug_tls_ctx_free(ctx);
+	if (sgug_http_request(c, "GET", url, NULL, 0, NULL, 0, 30000, &r) != 0) {
+		fprintf(stderr, "request: %s\n", sgug_http_last_error());
+		sgug_http_client_free(c);
 		return 1;
 	}
 
-	printf("protocol  %s\n", sgug_tls_version(tls));
-	printf("cipher    %s\n", sgug_tls_cipher(tls));
-	printf("verify    OK\n");
+	body = sgug_http_body(r, &body_len);
+	server = sgug_http_header(r, "Server");
+	date = sgug_http_header(r, "Date");
 
-	len = sgug_snprintf(req, sizeof(req),
-	    "HEAD / HTTP/1.1\r\n"
-	    "Host: %s\r\n"
-	    "User-Agent: irix-actions-runner/%s\r\n"
-	    "Connection: close\r\n"
-	    "\r\n", host, RUNNER_VERSION);
+	printf("status    %d\n", sgug_http_status(r));
+	printf("server    %s\n", server != NULL ? server : "(none)");
+	printf("body      %lu bytes\n", (unsigned long)body_len);
 
-	if (sgug_tls_write(tls, req, (size_t)len) < 0) {
-		fprintf(stderr, "write: %s\n", sgug_tls_last_error());
-		goto fail;
-	}
-
-	n = sgug_tls_read(tls, buf, sizeof(buf) - 1);
-	if (n <= 0) {
-		fprintf(stderr, "read: %s\n", sgug_tls_last_error());
-		goto fail;
-	}
-	buf[n] = '\0';
-
-	date = strcasestr(buf, "\r\nDate:");
 	if (date == NULL) {
-		fprintf(stderr, "no Date header in response\n");
-		goto fail;
+		fprintf(stderr, "no Date header, cannot measure clock\n");
+		goto out;
 	}
 
-	local = sgug_now();
-	remote = sgug_parse_http_date(date + 7);
-	if (remote < 0) {
-		fprintf(stderr, "unparseable Date header\n");
-		goto fail;
+	skew = sgug_http_skew(c);
+	printf("clock     skew %+lds vs server\n", (long)skew);
+	if (skew > 60 || skew < -60) {
+		printf("warning   clock is off by more than a minute; the runner\n");
+		printf("          will compensate, but enable NTP on this machine\n");
 	}
 
-	printf("clock     local %ld, server %ld, skew %+lds\n",
-	    (long)local, (long)remote, (long)(local - remote));
+	/* Parsing the response proves the JSON layer works against real service
+	 * output rather than only against fixtures. */
+	doc = sgug_json_parse(body, body_len, NULL, 0);
+	if (doc != NULL) {
+		const sgug_json *root = sgug_json_root(doc);
+
+		printf("json      parsed, %lu top-level keys\n",
+		    (unsigned long)sgug_json_len(root));
+		sgug_json_free(doc);
+	} else if (body_len > 0) {
+		printf("json      response was not JSON, which is fine here\n");
+	}
 
 	/*
-	 * OAuth assertions live five minutes, so anything approaching that
-	 * fails every token request with an opaque 401. The runner compensates
-	 * using this measurement, but a clock this wrong is worth fixing.
+	 * A second request on the same client must reuse the connection.
+	 * Handshakes cost tens of milliseconds on this hardware and the
+	 * listener reconnects every 50 seconds for as long as it runs.
 	 */
-	if (local - remote > 120 || remote - local > 120)
-		printf("warning   clock is off by more than two minutes, enable NTP\n");
+	sgug_http_resp_free(r);
+	r = NULL;
+	if (sgug_http_request(c, "GET", url, NULL, 0, NULL, 0, 30000, &r) != 0) {
+		fprintf(stderr, "second request: %s\n", sgug_http_last_error());
+		goto out;
+	}
+	printf("keepalive second request returned %d\n", sgug_http_status(r));
 
-	sgug_tls_free(tls);
-	sgug_tls_ctx_free(ctx);
 	printf("\nselftest OK\n");
-	return 0;
+	rc = 0;
 
-fail:
-	sgug_tls_free(tls);
-	sgug_tls_ctx_free(ctx);
-	return 1;
+out:
+	sgug_http_resp_free(r);
+	sgug_http_client_free(c);
+	return rc;
 }
 
 int

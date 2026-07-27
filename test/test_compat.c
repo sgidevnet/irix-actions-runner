@@ -92,6 +92,37 @@ test_snprintf_truncation(void)
 }
 
 static void
+test_i64toa(void)
+{
+	char buf[24];
+
+	/* long is 32 bits under the n32 ABI, so anything routed through "%ld"
+	 * loses the high word. messageId 1234567890123 came back as its low 32
+	 * bits, 1912276171, until this replaced printf. */
+	CHECK(sgug_i64toa(1234567890123LL, buf, sizeof(buf)) == 13);
+	CHECK_EQ_STR(buf, "1234567890123");
+
+	CHECK(sgug_i64toa(0, buf, sizeof(buf)) == 1);
+	CHECK_EQ_STR(buf, "0");
+
+	CHECK(sgug_i64toa(-1, buf, sizeof(buf)) == 2);
+	CHECK_EQ_STR(buf, "-1");
+
+	CHECK(sgug_i64toa(2147483648LL, buf, sizeof(buf)) == 10);
+	CHECK_EQ_STR(buf, "2147483648");
+
+	CHECK(sgug_i64toa(9223372036854775807LL, buf, sizeof(buf)) == 19);
+	CHECK_EQ_STR(buf, "9223372036854775807");
+
+	/* Negating INT64_MIN overflows, so the magnitude is accumulated
+	 * unsigned. */
+	CHECK(sgug_i64toa((-9223372036854775807LL - 1), buf, sizeof(buf)) == 20);
+	CHECK_EQ_STR(buf, "-9223372036854775808");
+
+	CHECK(sgug_i64toa(12345, buf, 5) == -1);
+}
+
+static void
 test_monotonic(void)
 {
 	int64_t a = sgug_monotonic_ms();
@@ -107,6 +138,7 @@ main(void)
 	test_parse_http_date();
 	test_format_iso8601();
 	test_snprintf_truncation();
+	test_i64toa();
 	test_monotonic();
 
 	if (failures != 0) {
