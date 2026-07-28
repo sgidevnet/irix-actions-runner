@@ -30,24 +30,6 @@ seterr(char *err, size_t errlen, const char *fmt, ...)
 	va_end(ap);
 }
 
-int
-sgug_step_should_run(const char *condition, int job_failed, int job_cancelled)
-{
-	if (condition == NULL || *condition == '\0')
-		return !job_failed && !job_cancelled;
-
-	if (strstr(condition, "always()") != NULL)
-		return 1;
-	if (strstr(condition, "cancelled()") != NULL ||
-	    strstr(condition, "canceled()") != NULL)
-		return job_cancelled;
-	if (strstr(condition, "failure()") != NULL)
-		return job_failed && !job_cancelled;
-
-	/* success(), and anything we do not parse. */
-	return !job_failed && !job_cancelled;
-}
-
 /* Picks the interpreter. SGUG's bash first, since workflows assume bash. */
 static const char *
 resolve_shell(const char *want)

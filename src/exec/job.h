@@ -18,7 +18,7 @@
 typedef enum {
 	SGUG_STEP_SCRIPT,	/* run:, the only kind we execute */
 	SGUG_STEP_ACTION,	/* uses:, dispatched to a native handler */
-	SGUG_STEP_UNSUPPORTED	/* docker, container registry, ${{ }} bodies */
+	SGUG_STEP_UNSUPPORTED	/* docker, container registry */
 } sgug_step_kind;
 
 typedef struct {
@@ -37,9 +37,24 @@ typedef struct {
 	/* SGUG_STEP_ACTION */
 	const char *action_name;	/* e.g. actions/checkout */
 	const char *action_ref;		/* e.g. v4 */
-	/* The step's `with:` block, for a handler to read. Still a
-	 * TemplateToken, so read it with the exec/token.h accessors. */
+
+	/*
+	 * The step's inputs: a `with:` block for an action, and the script,
+	 * shell and workingDirectory for a `run:`. Still a TemplateToken, so
+	 * read it with the exec/token.h accessors. Any value may be a type 3
+	 * expression, which is why runjob.c evaluates these rather than using
+	 * the literals above.
+	 */
 	const sgug_json *inputs;
+
+	/* The step's own `env:`, layered over the job's for expressions that
+	 * read the env context. */
+	const sgug_json *env;
+
+	/* The step's `name:`, still a TemplateToken. Resolved by runjob.c
+	 * before the timeline is posted, since that goes out in one request
+	 * ahead of the first step. */
+	const sgug_json *name_token;
 
 	/* SGUG_STEP_UNSUPPORTED: what to tell the user. Never NULL for that
 	 * kind, so the reason reaches the job log instead of a generic line. */

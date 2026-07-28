@@ -2,7 +2,7 @@ UNAME_S := $(shell uname -s)
 
 BUILD   := build
 # Everything except main.c, so each test binary can supply its own entry point.
-LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c src/crypto/*.c src/json/*.c src/proto/*.c src/exec/*.c src/sandbox/*.c)
+LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c src/crypto/*.c src/json/*.c src/proto/*.c src/exec/*.c src/expr/*.c src/sandbox/*.c)
 SRCS      := $(LIB_SRCS) src/main.c
 LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/%.o)
 OBJS      := $(SRCS:%.c=$(BUILD)/%.o)
@@ -49,9 +49,14 @@ endif
 DEPS := $(OBJS:.o=.d) $(TEST_SRCS:test/%.c=$(BUILD)/%.d)
 CFLAGS += -MMD -MP
 
-.PHONY: all check test clean
+.PHONY: all check test clean grammar
 
 all: $(BUILD)/runner
+
+# Manual on purpose: the generated parser is committed so no ordinary build
+# needs bison, and an automatic rule would quietly use stale tables.
+grammar:
+	cd src/expr && bison -d -o grammar.tab.c grammar.y
 
 $(BUILD)/runner: $(OBJS)
 	@mkdir -p $(@D)

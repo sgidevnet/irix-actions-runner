@@ -23,20 +23,6 @@ sgug_token_str(const sgug_json *tok, const char *fallback)
 	return sgug_json_string(v, fallback);
 }
 
-int
-sgug_token_is_literal(const sgug_json *tok)
-{
-	if (tok == NULL)
-		return 0;
-
-	if (sgug_json_type_of(tok) == SGUG_JSON_STRING)
-		return 1;
-
-	return sgug_json_get(tok, "lit") != NULL ||
-	    sgug_json_get(tok, "s") != NULL ||
-	    sgug_json_get(tok, "value") != NULL;
-}
-
 /* The entry list of a mapping token, whichever spelling was used. */
 static const sgug_json *
 map_entries(const sgug_json *tok)

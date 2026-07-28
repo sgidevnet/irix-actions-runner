@@ -3,6 +3,8 @@
 #include "exec/handlers.h"
 #include "exec/job.h"
 #include "exec/step.h"
+#include "exec/token.h"
+#include "expr/expr.h"
 #include "proto/report.h"
 #include "sandbox/confine.h"
 #include "version.h"
@@ -171,6 +173,82 @@ build_env(const sgug_job *job, const sgug_config *cfg, const char *workspace,
 	return n;
 }
 
+/*
+ * A step input, evaluated. Absent stays absent, since a missing `shell` and an
+ * empty one mean different things.
+ */
+static int
+eval_input(sgug_expr_ctx *ctx, const sgug_json *inputs, const char *key,
+    char **out, char *err, size_t errlen)
+{
+	const sgug_json *v = sgug_token_map_get(inputs, key);
+
+	*out = NULL;
+	if (v == NULL)
+		return 0;
+	return sgug_expr_eval_token(ctx, v, out, err, errlen);
+}
+
+/*
+ * A `with:` block, evaluated, rebuilt as a compact TemplateToken so the
+ * handlers keep reading it through exec/token.h. A value the workflow wrote as
+ * ${{ }} arrives as a type 3 token, which sgug_token_str reads as absent: an
+ * artifact named from github.run_id used to upload as "artifact".
+ */
+static int
+eval_inputs(sgug_expr_ctx *ctx, const sgug_json *inputs, sgug_json_doc **out,
+    char *err, size_t errlen)
+{
+	sgug_jsonw *w = sgug_jsonw_new();
+	const char *text;
+	size_t i, n, len;
+	int rc = -1;
+
+	*out = NULL;
+	if (w == NULL) {
+		seterr(err, errlen, "out of memory");
+		return -1;
+	}
+
+	sgug_jsonw_obj_begin(w);
+	sgug_jsonw_key(w, "d");
+	sgug_jsonw_arr_begin(w);
+
+	n = sgug_token_len(inputs);
+	for (i = 0; i < n; i++) {
+		const char *k = NULL;
+		const sgug_json *v = NULL;
+		char *s = NULL;
+
+		if (sgug_token_map_at(inputs, i, &k, &v) != 0)
+			continue;
+		if (sgug_expr_eval_token(ctx, v, &s, err, errlen) != 0)
+			goto out;
+
+		sgug_jsonw_obj_begin(w);
+		sgug_jsonw_key(w, "k");
+		sgug_jsonw_str(w, k);
+		sgug_jsonw_key(w, "v");
+		sgug_jsonw_str(w, s);
+		sgug_jsonw_obj_end(w);
+		free(s);
+	}
+
+	sgug_jsonw_arr_end(w);
+	sgug_jsonw_obj_end(w);
+
+	text = sgug_jsonw_done(w, &len);
+	if (text == NULL) {
+		seterr(err, errlen, "out of memory");
+		goto out;
+	}
+	*out = sgug_json_parse(text, len, err, errlen);
+	rc = *out != NULL ? 0 : -1;
+out:
+	sgug_jsonw_free(w);
+	return rc;
+}
+
 int
 sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
     const char *message, size_t message_len,
@@ -178,6 +256,7 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 {
 	sgug_job job;
 	sgug_reporter *rep = NULL;
+	sgug_expr_ctx *ectx = NULL;
 	sgug_step_opts sopts;
 	sgug_confine_opts confine;
 	char confdesc[256];
@@ -234,10 +313,39 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 		return -1;
 	}
 
+	ectx = sgug_expr_ctx_new(&job, cfg, workspace, temp);
+	if (ectx == NULL) {
+		seterr(err, errlen, "out of memory");
+		sgug_report_free(rep);
+		sgug_job_free(&job);
+		return -1;
+	}
+
 	printf("job       %s (%lu steps)\n", job.job_display_name,
 	    (unsigned long)job.nsteps);
 
 	fflush(stdout);
+
+	/*
+	 * Names are resolved before any record is posted, because the timeline
+	 * goes out in one request ahead of the first step. A name that fails to
+	 * evaluate keeps the literal rather than failing the job.
+	 */
+	for (i = 0; i < job.nsteps; i++) {
+		sgug_step *st = &job.steps[i];
+		char *name = NULL;
+
+		sgug_expr_ctx_set_step_env(ectx, st->env);
+		if (sgug_expr_eval_token(ectx, st->name_token, &name, NULL, 0)
+		    != 0)
+			continue;
+		if (name != NULL && *name != '\0') {
+			sgug_snprintf(st->label_buf, sizeof(st->label_buf),
+			    "%s", name);
+			st->display_name = st->label_buf;
+		}
+		free(name);
+	}
 
 	sgug_report_begin(rep);
 	sgug_report_job_started(rep);
@@ -262,13 +370,34 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 
 	for (i = 0; i < job.nsteps; i++) {
 		const sgug_step *st = &job.steps[i];
+		sgug_step ev;
+		sgug_json_doc *evinputs = NULL;
+		char *script = NULL, *shell = NULL, *workdir = NULL;
+		const char *cond = st->condition != NULL &&
+		    *st->condition != '\0' ? st->condition : "success()";
 		char steperr[256];
-		int status;
+		int status, run = 0;
 
 		if (stop != NULL && *stop)
 			cancelled = 1;
 
-		if (!sgug_step_should_run(st->condition, failed, cancelled)) {
+		sgug_expr_ctx_set_status(ectx, failed, cancelled);
+		sgug_expr_ctx_set_step_env(ectx, st->env);
+
+		steperr[0] = '\0';
+		if (sgug_expr_eval_bool(ectx, cond, &run, steperr,
+		    sizeof(steperr)) != 0) {
+			printf("step      %s\n", st->display_name);
+			fflush(stdout);
+			sgug_report_step_started(rep, i);
+			rc.step = i;
+			on_line(&rc, steperr);
+			sgug_report_step_finished(rep, i, SGUG_RESULT_FAILED);
+			failed = 1;
+			continue;
+		}
+
+		if (!run) {
 			sgug_report_step_finished(rep, i, SGUG_RESULT_SKIPPED);
 			printf("step      %s (skipped)\n", st->display_name);
 			fflush(stdout);
@@ -285,9 +414,39 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 		sopts.abort_ctx = &rc;
 		sopts.tick_cb = on_tick;
 		sopts.tick_ctx = &rc;
-		steperr[0] = '\0';
 
-		if (st->kind == SGUG_STEP_ACTION) {
+		/*
+		 * Expressions are evaluated here rather than at parse time
+		 * because success() and the step contexts depend on what has
+		 * already run.
+		 */
+		ev = *st;
+		if (st->kind == SGUG_STEP_SCRIPT) {
+			if (eval_input(ectx, st->inputs, "script", &script,
+			    steperr, sizeof(steperr)) != 0 ||
+			    eval_input(ectx, st->inputs, "shell", &shell,
+			    steperr, sizeof(steperr)) != 0 ||
+			    eval_input(ectx, st->inputs, "workingDirectory",
+			    &workdir, steperr, sizeof(steperr)) != 0) {
+				on_line(&rc, steperr);
+				sgug_report_step_finished(rep, i,
+				    SGUG_RESULT_FAILED);
+				failed = 1;
+				free(script);
+				free(shell);
+				free(workdir);
+				continue;
+			}
+			if (script != NULL)
+				ev.script = script;
+			if (shell != NULL)
+				ev.shell = shell;
+			if (workdir != NULL)
+				ev.working_directory = workdir;
+
+			status = sgug_step_run(&ev, &sopts, on_line, &rc,
+			    steperr, sizeof(steperr));
+		} else if (st->kind == SGUG_STEP_ACTION) {
 			sgug_action_fn h = sgug_action_lookup(st->action_name);
 
 			if (h == NULL) {
@@ -304,17 +463,30 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 				failed = 1;
 				continue;
 			}
-			status = h(&job, st, &sopts, on_line, &rc, steperr,
+
+			if (eval_inputs(ectx, st->inputs, &evinputs, steperr,
+			    sizeof(steperr)) != 0) {
+				on_line(&rc, steperr);
+				sgug_report_step_finished(rep, i,
+				    SGUG_RESULT_FAILED);
+				failed = 1;
+				continue;
+			}
+			ev.inputs = sgug_json_root(evinputs);
+
+			status = h(&job, &ev, &sopts, on_line, &rc, steperr,
 			    sizeof(steperr));
-		} else if (st->kind != SGUG_STEP_SCRIPT) {
+		} else {
 			on_line(&rc, st->unsupported_reason);
 			sgug_report_step_finished(rep, i, SGUG_RESULT_FAILED);
 			failed = 1;
 			continue;
-		} else {
-			status = sgug_step_run(st, &sopts, on_line, &rc, steperr,
-			    sizeof(steperr));
 		}
+
+		free(script);
+		free(shell);
+		free(workdir);
+		sgug_json_free(evinputs);
 
 		sgug_report_flush(rep);
 
@@ -356,6 +528,7 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 
 	for (i = 0; i < nenv; i++)
 		free(env[i]);
+	sgug_expr_ctx_free(ectx);
 	sgug_report_free(rep);
 	sgug_job_free(&job);
 

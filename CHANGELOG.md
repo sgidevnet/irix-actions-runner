@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- An evaluator for the `${{ }}` expression language, in `src/expr/`. It works
+  in a `run:` body, in a `with:` value and in `if:`, over every context the job
+  message carries, including `env` and `secrets`. The grammar is
+  `src/expr/grammar.y`; the generated parser is committed, so no build needs
+  bison.
+- `test/fixtures/expressions`, GitHub's own cross-language conformance corpus
+  for the language, vendored and driven by `test/test_expr.c`.
+
+### Fixed
+
+- `${{ }}` in a `with:` value read as absent, so an artifact whose name was
+  built from run metadata silently uploaded as `artifact`.
+- `if:` was three `strstr` calls. `if: !cancelled()` evaluated inverted, and
+  anything with a comparison in it was treated as `success()`.
+- A `run:` body containing `${{ }}` was rejected outright; it now runs.
+- `canceled()` with one `l` was accepted and behaved as `cancelled()`. The
+  reference registers only the two-`l` spelling, so a misspelling now fails the
+  step instead of quietly always reporting "not cancelled".
+
+### Known limitations
+
+- `hashFiles()` and the `steps` context are not implemented. Both fail the step
+  by name rather than reading as empty.
+- Case-insensitive comparison folds ASCII only.
+- An `env:` block is readable through the `env` context but is still not
+  exported into the step's shell environment.
+
 ## [0.2.0] - 2026-07-28
 
 ### Added

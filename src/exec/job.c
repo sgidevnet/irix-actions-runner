@@ -69,13 +69,16 @@ parse_step(sgug_step *st, const sgug_json *s)
 	st->context_name = sgug_json_string(sgug_json_get(s, "contextName"), "");
 	st->condition = sgug_json_string(sgug_json_get(s, "condition"),
 	    "success()");
-	st->display_name = sgug_token_str(sgug_json_get(s, "displayNameToken"),
-	    NULL);
+	st->name_token = sgug_json_get(s, "displayNameToken");
+	st->display_name = sgug_token_str(st->name_token, NULL);
 
 	ref = sgug_json_get(s, "reference");
 	reftype = sgug_json_string(sgug_json_get(ref, "type"), "");
 
 	inputs = sgug_json_get(s, "inputs");
+
+	st->inputs = inputs;
+	st->env = sgug_json_get(s, "environment");
 
 	if (strcmp(reftype, "script") == 0) {
 		st->kind = SGUG_STEP_SCRIPT;
@@ -86,29 +89,17 @@ parse_step(sgug_step *st, const sgug_json *s)
 		 * nothing at all, silently.
 		 */
 		v = sgug_token_map_get(inputs, "script");
-		if (v != NULL && !sgug_token_is_literal(v)) {
-			/* Without this the script reads as empty and the step
-			 * is reported as having succeeded without running. */
-			st->kind = SGUG_STEP_UNSUPPORTED;
-			st->unsupported_reason =
-			    "this step's script is a ${{ }} expression, and "
-			    "this runner has no expression evaluator yet. Use "
-			    "the $GITHUB_* shell variables instead, or run the "
-			    "step on a hosted runner. See docs/protocol.md.";
-		} else {
-			st->script = sgug_token_str(v, "");
-			v = sgug_token_map_get(inputs, "shell");
-			if (v != NULL)
-				st->shell = sgug_token_str(v, NULL);
-			v = sgug_token_map_get(inputs, "workingDirectory");
-			if (v != NULL)
-				st->working_directory = sgug_token_str(v, NULL);
-		}
+		st->script = sgug_token_str(v, "");
+		v = sgug_token_map_get(inputs, "shell");
+		if (v != NULL)
+			st->shell = sgug_token_str(v, NULL);
+		v = sgug_token_map_get(inputs, "workingDirectory");
+		if (v != NULL)
+			st->working_directory = sgug_token_str(v, NULL);
 	} else if (strcmp(reftype, "repository") == 0) {
 		st->kind = SGUG_STEP_ACTION;
 		st->action_name = sgug_json_string(sgug_json_get(ref, "name"), "");
 		st->action_ref = sgug_json_string(sgug_json_get(ref, "ref"), "");
-		st->inputs = inputs;
 	} else {
 		st->kind = SGUG_STEP_UNSUPPORTED;
 		st->action_name = reftype;
