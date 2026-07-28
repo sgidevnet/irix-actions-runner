@@ -42,7 +42,7 @@ sgug_tcp_connect(const char *host, int port, int timeout_ms)
 {
 	struct sockaddr_in sin;
 	struct pollfd pfd;
-	int fd, flags, err;
+	int fd, flags, err, pr;
 	socklen_t errlen;
 
 	memset(&sin, 0, sizeof(sin));
@@ -67,7 +67,12 @@ sgug_tcp_connect(const char *host, int port, int timeout_ms)
 		pfd.events = POLLOUT;
 		pfd.revents = 0;
 
-		if (poll(&pfd, 1, timeout_ms) != 1)
+		/* Retried because the caller may be running a periodic
+		 * alarm; poll is never restarted by SA_RESTART. */
+		do {
+			pr = poll(&pfd, 1, timeout_ms);
+		} while (pr < 0 && errno == EINTR);
+		if (pr != 1)
 			goto fail;
 
 		errlen = sizeof(err);

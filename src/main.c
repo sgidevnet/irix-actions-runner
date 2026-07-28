@@ -8,6 +8,9 @@
 #include "proto/register.h"
 #include "version.h"
 
+#include <sys/stat.h>
+
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +33,13 @@ usage(FILE *to, int rc)
 	      "\n"
 	      "  run [--verbose|--trace]\n"
 	      "      listen for jobs; this is what makes the runner show Online\n"
+	      "\n"
+	      "  execjob --message FILE --name NAME --work DIR [options]\n"
+	      "      run one job from a message file; needs no configuration\n"
+	      "      --message FILE     the job message as received\n"
+	      "      --name NAME        runner name the job sees\n"
+	      "      --work DIR         work folder, must be absolute\n"
+	      "      --cancel-file PATH abort when this file's mtime changes\n"
 	      "\n"
 	      "  remove --token TOKEN   deregister and delete local configuration\n"
 	      "  status                 show the configured runner\n"
@@ -219,9 +229,14 @@ should_abort(void *ctx)
 	return stop_requested != 0;
 }
 
+typedef int (*job_runner)(sgug_http_client *http, const sgug_config *cfg,
+    const char *message, size_t message_len, volatile sig_atomic_t *stop,
+    char *err, size_t errlen);
+
 struct dispatch_ctx {
 	sgug_http_client *http;
 	const sgug_config *cfg;
+	job_runner run_job;
 	int seen;
 };
 
@@ -239,7 +254,7 @@ dispatch_message(void *ctx, const sgug_message *msg)
 	if (strcmp(msg->type, "PipelineAgentJobRequest") == 0 ||
 	    strcmp(msg->type, "RunnerJobRequest") == 0) {
 		err[0] = '\0';
-		if (sgug_run_job(d->http, d->cfg, msg->body, msg->body_len,
+		if (d->run_job(d->http, d->cfg, msg->body, msg->body_len,
 		    &stop_requested, err, sizeof(err)) != 0)
 			fprintf(stderr, "job failed to report: %s\n", err);
 	}
@@ -331,6 +346,7 @@ cmd_run(int argc, char **argv)
 	opts.key = key;
 	dctx.http = http;
 	dctx.cfg = &cfg;
+	dctx.run_job = sgug_run_job;
 	dctx.seen = 0;
 
 	opts.on_message = dispatch_message;
@@ -349,6 +365,180 @@ cmd_run(int argc, char **argv)
 	sgug_http_client_free(http);
 	sgug_rsa_free(key);
 	return rc == 0 ? 0 : 1;
+}
+
+/* step.c polls the abort flag every 500ms, so this is the added latency. */
+#define CANCEL_POLL_SECS 5
+
+static volatile sig_atomic_t cancel_requested;
+static const char *cancel_path;
+static sgug_time_t cancel_mtime;
+
+/*
+ * mtime, not the file appearing: on an NFS export IRIX caches the directory
+ * lookup for acdirmax, 60 seconds by default, so a file created after the job
+ * started stays invisible that long. Attribute caching still bounds how fresh
+ * the mtime itself is.
+ */
+static void
+on_cancel_alarm(int sig)
+{
+	struct stat st;
+	int saved = errno;
+
+	(void)sig;
+	if (stat(cancel_path, &st) == 0 &&
+	    (sgug_time_t)st.st_mtime != cancel_mtime)
+		cancel_requested = 1;
+	alarm(CANCEL_POLL_SECS);
+	errno = saved;
+}
+
+static void
+on_cancel_signal(int sig)
+{
+	(void)sig;
+	cancel_requested = 1;
+}
+
+/*
+ * cfg is a stack stub carrying the only two fields anything below
+ * sgug_run_job reads. Token, service URLs and secrets are all in the message,
+ * so a throwaway host never needs .runner, .credentials or .rsakey.
+ */
+static int
+cmd_execjob(int argc, char **argv)
+{
+	sgug_config cfg;
+	sgug_http_client *http = NULL;
+	FILE *f = NULL;
+	char *message = NULL;
+	char err[512];
+	const char *path = NULL, *name = NULL, *work = NULL;
+	long len = 0;
+	int i, rc = 1;
+
+	for (i = 2; i < argc; i++) {
+		if (strcmp(argv[i], "--message") == 0)
+			path = arg_after(argc, argv, &i, "--message");
+		else if (strcmp(argv[i], "--name") == 0)
+			name = arg_after(argc, argv, &i, "--name");
+		else if (strcmp(argv[i], "--work") == 0)
+			work = arg_after(argc, argv, &i, "--work");
+		else if (strcmp(argv[i], "--cancel-file") == 0)
+			cancel_path = arg_after(argc, argv, &i,
+			    "--cancel-file");
+		else {
+			fprintf(stderr, "unknown option %s\n", argv[i]);
+			return 2;
+		}
+	}
+
+	if (path == NULL || name == NULL || work == NULL) {
+		fprintf(stderr, "--message, --name and --work are required\n");
+		return 2;
+	}
+
+	/* Relative resolves against getcwd inside sgug_run_job, which the
+	 * caller does not control. */
+	if (work[0] != '/') {
+		fprintf(stderr, "--work must be an absolute path\n");
+		return 2;
+	}
+	if (strlen(work) >= sizeof(cfg.work_folder)) {
+		fprintf(stderr, "--work must be under %lu bytes\n",
+		    (unsigned long)sizeof(cfg.work_folder));
+		return 2;
+	}
+
+	f = fopen(path, "rb");
+	if (f == NULL) {
+		fprintf(stderr, "%s: %s\n", path, strerror(errno));
+		return 1;
+	}
+	if (fseek(f, 0, SEEK_END) != 0 || (len = ftell(f)) < 0) {
+		fprintf(stderr, "%s: cannot determine the size\n", path);
+		goto out;
+	}
+	rewind(f);
+
+	message = malloc((size_t)len + 1);
+	if (message == NULL) {
+		fprintf(stderr, "out of memory\n");
+		goto out;
+	}
+	if (fread(message, 1, (size_t)len, f) != (size_t)len) {
+		fprintf(stderr, "%s: short read of %lu bytes\n", path,
+		    (unsigned long)len);
+		goto out;
+	}
+	message[len] = '\0';
+
+	http = sgug_http_client_new(NULL, SGUG_USER_AGENT);
+	if (http == NULL) {
+		fprintf(stderr, "http client: %s\n", sgug_http_last_error());
+		goto out;
+	}
+
+	signal(SIGPIPE, SIG_IGN);
+
+	if (cancel_path != NULL) {
+		struct sigaction sa;
+		struct stat st;
+
+		if (stat(cancel_path, &st) != 0) {
+			fprintf(stderr, "%s: %s\n", cancel_path,
+			    strerror(errno));
+			goto out;
+		}
+		cancel_mtime = (sgug_time_t)st.st_mtime;
+
+		/*
+		 * SA_RESTART, unlike the shutdown signals below: a bare poll
+		 * in sgug_tcp_connect and the reads inside SSL_connect treat
+		 * EINTR as fatal, so a repeating alarm would fail connections
+		 * at random. Nothing needs the interruption; step.c reaches
+		 * the flag through its own 500ms poll timeout.
+		 */
+		memset(&sa, 0, sizeof(sa));
+		sa.sa_handler = on_cancel_alarm;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = SA_RESTART;
+		sigaction(SIGALRM, &sa, NULL);
+		alarm(CANCEL_POLL_SECS);
+	}
+
+	/* Cancel rather than die, so the job still reports a result. Without
+	 * this a docker stop leaves the service holding the slot forever. */
+	{
+		struct sigaction sa;
+
+		memset(&sa, 0, sizeof(sa));
+		sa.sa_handler = on_cancel_signal;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = 0;
+		sigaction(SIGINT, &sa, NULL);
+		sigaction(SIGTERM, &sa, NULL);
+	}
+
+	memset(&cfg, 0, sizeof(cfg));
+	sgug_snprintf(cfg.agent_name, sizeof(cfg.agent_name), "%s", name);
+	sgug_snprintf(cfg.work_folder, sizeof(cfg.work_folder), "%s", work);
+
+	err[0] = '\0';
+	if (sgug_run_job(http, &cfg, message, (size_t)len, &cancel_requested,
+	    err, sizeof(err)) != 0) {
+		fprintf(stderr, "execjob: %s\n", err);
+		goto out;
+	}
+	rc = 0;
+
+out:
+	if (f != NULL)
+		fclose(f);
+	free(message);
+	sgug_http_client_free(http);
+	return rc;
 }
 
 static int
@@ -512,6 +702,8 @@ main(int argc, char **argv)
 		return cmd_remove(argc, argv);
 	if (strcmp(argv[1], "run") == 0)
 		return cmd_run(argc, argv);
+	if (strcmp(argv[1], "execjob") == 0)
+		return cmd_execjob(argc, argv);
 	if (strcmp(argv[1], "status") == 0)
 		return cmd_status();
 
