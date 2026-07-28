@@ -66,9 +66,9 @@ jobs:
 
 Push it and watch the job run on your SGI.
 
-A worked example that builds a real program from upstream source, including the
-portability failure it hits on IRIX, is at
-[irix-actions-figlet-demo](https://github.com/sgidevnet/irix-actions-figlet-demo).
+For a real one, see
+[irix-actions-figlet-demo](https://github.com/sgidevnet/irix-actions-figlet-demo):
+it builds figlet from upstream and shows what breaks on IRIX.
 
 ## Requirements
 
