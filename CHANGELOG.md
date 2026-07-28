@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-28
+
 ### Added
 
 - Live console output. Step output now appears in the UI while the step is
@@ -18,8 +20,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Steps now run under `-e`, and bash steps under `-o pipefail`, matching
+  GitHub's documented defaults. Only the last command in a multi-line `run:`
+  body used to decide the step's result, so any check followed by another
+  command was not a gate.
+- A `run:` body containing `${{ }}` is rejected with an explanation instead of
+  producing an empty script that was reported as succeeded.
+- Secret redaction no longer writes past its buffer for a mask shorter than
+  three characters.
+- Cancellation and the step deadline were only checked when the output poll
+  timed out, so a step printing continuously could not be cancelled and could
+  not time out.
+- The whole-job log is accumulated as steps run rather than stitched from every
+  step's buffer at job end, so a job no longer has to hold all of its output at
+  once.
 - `docs/protocol.md` claimed the blob API was the live tailing route. It is
   not; it is the durable log, and the live tail is a separate socket.
+
+### Changed
+
+- Unit tests run on Linux for every pull request.
+- The binary is pinned to MIPS III explicitly rather than inheriting it from
+  the compiler default, and the release asserts it.
 
 ## [0.1.0] - 2026-07-27
 
@@ -71,5 +93,6 @@ back to GitHub.
 - `chroot` confinement applies only when the runner is started as root, and is
   untested.
 
-[Unreleased]: https://github.com/sgidevnet/irix-actions-runner/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sgidevnet/irix-actions-runner/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sgidevnet/irix-actions-runner/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sgidevnet/irix-actions-runner/releases/tag/v0.1.0

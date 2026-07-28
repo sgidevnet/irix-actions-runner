@@ -6,7 +6,7 @@
  * The release workflow refuses to publish unless the git tag, this constant and
  * the CHANGELOG entry all agree.
  */
-#define SGUG_PROJECT_VERSION "0.1.0"
+#define SGUG_PROJECT_VERSION "0.2.0"
 
 /*
  * Reported to the Actions service at registration and on every long poll.
