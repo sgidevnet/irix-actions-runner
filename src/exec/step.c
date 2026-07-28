@@ -237,6 +237,11 @@ spawn(const char *const *argv, const char *cwd, const sgug_step_opts *opts,
 			held += (size_t)n;
 			held = drain_lines(buf, held, on_line, ctx);
 
+			/* A step producing output continuously never reaches
+			 * the poll timeout below, so tick here too. */
+			if (opts->tick_cb != NULL)
+				opts->tick_cb(opts->tick_ctx);
+
 			/*
 			 * A line longer than the buffer is emitted in pieces
 			 * rather than growing without bound, which a runaway
@@ -251,7 +256,10 @@ spawn(const char *const *argv, const char *cwd, const sgug_step_opts *opts,
 			continue;
 		}
 
-		/* Timed out or interrupted: check whether to give up. */
+		/* Timed out or interrupted. */
+		if (opts->tick_cb != NULL)
+			opts->tick_cb(opts->tick_ctx);
+
 		if (!killed && opts->abort_cb != NULL &&
 		    opts->abort_cb(opts->abort_ctx) != 0) {
 			kill(pid, SIGTERM);

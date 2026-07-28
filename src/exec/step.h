@@ -17,6 +17,10 @@
 /* Called once per line of combined stdout and stderr, without the newline. */
 typedef void (*sgug_step_output_fn)(void *ctx, const char *line);
 
+/* Periodic heartbeat during a step. Must not block for long: it runs on the
+ * thread draining the child's pipe. */
+typedef void (*sgug_step_tick_fn)(void *ctx);
+
 /* Consulted between reads; return non-zero to kill the step. */
 typedef int (*sgug_step_abort_fn)(void *ctx);
 
@@ -37,6 +41,15 @@ typedef struct {
 
 	sgug_step_abort_fn abort_cb;
 	void *abort_ctx;
+
+	/*
+	 * Called periodically while the step runs, at most every POLL_SLICE_MS
+	 * and also after each batch of output. Exists so the reporter can push
+	 * console lines during a step instead of only when it ends; a step that
+	 * prints nothing for a minute must still get its tail flushed.
+	 */
+	sgug_step_tick_fn tick_cb;
+	void *tick_ctx;
 
 	/* Applied in the child between fork and exec. NULL leaves the step
 	 * unconfined, which is only appropriate for the runner's own helpers. */

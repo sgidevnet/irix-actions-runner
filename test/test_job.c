@@ -183,6 +183,10 @@ test_parse_fixture(void)
 	    "https://run-actions-1-azure-eastus.actions.githubusercontent.com/177/");
 	CHECK_EQ_STR(job.access_token, "SYNTHETIC-JOB-TOKEN");
 	CHECK(strstr(job.pipelines_url, "pipelinesghubeus") != NULL);
+	/* The live console feed. Read from the same endpoint data block, and
+	 * absent from every version of the reference documentation. */
+	CHECK_EQ_STR(job.feed_stream_url,
+	    "wss://results-receiver.actions.githubusercontent.com/_ws/ingest.sock");
 
 	CHECK(job.nsteps == 2);
 	if (job.nsteps >= 2) {

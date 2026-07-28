@@ -42,6 +42,8 @@ parse_endpoint(sgug_job *job, const sgug_json *root, char *err, size_t errlen)
 		    sgug_json_path(e, "data.PipelinesServiceUrl"), "");
 		job->results_url = sgug_json_string(
 		    sgug_json_path(e, "data.ResultsServiceUrl"), "");
+		job->feed_stream_url = sgug_json_string(
+		    sgug_json_path(e, "data.FeedStreamUrl"), "");
 
 		if (job->access_token[0] == '\0') {
 			seterr(err, errlen,

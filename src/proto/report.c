@@ -5,6 +5,8 @@
 #include "proto/config.h"
 #include "proto/mask.h"
 #include "proto/results.h"
+#include "net/ws.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +22,15 @@
 #define MAX_FEED_LINES 1024
 #define MAX_LINE 1024
 
+/* Lines per feed message, and how often the feed is pushed. Both match the
+ * official runner, which the service has certainly been tuned against. */
+#define FEED_BATCH 100
+#define FEED_INTERVAL_MS 500
+
+/* Log block size. Above this the log is streamed to an append blob instead of
+ * being held whole, which bounds what one noisy step can cost in memory. */
+#define LOG_BLOCK (2 * 1024 * 1024)
+
 struct step_state {
 	char record_id[40];
 	int64_t log_id;
@@ -28,10 +39,11 @@ struct step_state {
 	sgug_result result;
 	int ran;
 	int64_t log_lines;
-	/* Whole-step output, uploaded once at step end. */
+	/* Output not yet uploaded. Flushed at LOG_BLOCK and at step end. */
 	char *log;
 	size_t log_len;
 	size_t log_cap;
+	int log_blocks_sent;
 	/* Pending console lines, flushed periodically. */
 	char *feed[MAX_FEED_LINES];
 	size_t nfeed;
@@ -60,6 +72,23 @@ struct sgug_reporter {
 	/* NULL on deployments that still use the timeline API. */
 	sgug_results *results;
 	int steps_update_failures;
+
+	/* Live console feed. Opened on the first batch and abandoned on the
+	 * first failure; the uploaded log is what actually has to arrive. */
+	sgug_ws *feed;
+	int feed_off;
+	int64_t feed_due;
+
+	/*
+	 * The whole-job log, accumulated as steps run rather than stitched from
+	 * theirs at the end: block uploads clear a step's buffer, and holding
+	 * every step's output at once was the larger cost anyway.
+	 */
+	char *joblog;
+	size_t joblog_len;
+	size_t joblog_cap;
+	int64_t joblog_lines;
+	int joblog_blocks_sent;
 
 	char err[512];
 };
@@ -144,11 +173,15 @@ sgug_report_free(sgug_reporter *r)
 
 	sgug_results_free(r->results);
 
+	sgug_ws_close(r->feed);
+	sgug_ws_free(r->feed);
+
 	for (i = 0; i < SGUG_JOB_MAX_STEPS; i++) {
 		free(r->steps[i].log);
 		for (j = 0; j < r->steps[i].nfeed; j++)
 			free(r->steps[i].feed[j]);
 	}
+	free(r->joblog);
 	free(r);
 }
 
@@ -444,29 +477,75 @@ redact(const sgug_reporter *r, const char *line)
 }
 
 static int
-log_append(struct step_state *st, const char *text)
+log_append(char **buf, size_t *len, size_t *cap, const char *text)
 {
 	size_t n = strlen(text);
 
-	if (st->log_len + n + 2 > st->log_cap) {
-		size_t ncap = st->log_cap != 0 ? st->log_cap : 4096;
+	if (*len + n + 2 > *cap) {
+		size_t ncap = *cap != 0 ? *cap : 4096;
 		char *nb;
 
-		while (ncap < st->log_len + n + 2)
+		while (ncap < *len + n + 2)
 			ncap *= 2;
-		nb = realloc(st->log, ncap);
+		nb = realloc(*buf, ncap);
 		if (nb == NULL)
 			return -1;
-		st->log = nb;
-		st->log_cap = ncap;
+		*buf = nb;
+		*cap = ncap;
 	}
 
-	memcpy(st->log + st->log_len, text, n);
-	st->log_len += n;
-	st->log[st->log_len++] = '\n';
-	st->log[st->log_len] = '\0';
-	st->log_lines++;
+	memcpy(*buf + *len, text, n);
+	*len += n;
+	(*buf)[(*len)++] = '\n';
+	(*buf)[*len] = '\0';
 	return 0;
+}
+
+/*
+ * Uploads what has accumulated. finalize seals the blob and registers the log,
+ * and must be sent exactly once per step even when the last block is empty.
+ *
+ * Best effort while a step runs: losing a mid-step block costs that slice of
+ * the log, and failing the step over it would be worse.
+ */
+static void
+flush_log_block(sgug_reporter *r, struct step_state *st, int finalize)
+{
+	char err[256];
+
+	if (r->results == NULL || (st->log_len == 0 && !finalize))
+		return;
+
+	err[0] = '\0';
+	if (sgug_results_step_log(r->results, st->record_id, st->log,
+	    st->log_len, st->log_lines, st->log_blocks_sent == 0, finalize,
+	    err, sizeof(err)) != 0)
+		fprintf(stderr, "log upload: %s\n", err);
+
+	st->log_blocks_sent++;
+	st->log_len = 0;
+	if (st->log != NULL)
+		st->log[0] = '\0';
+}
+
+static void
+flush_job_block(sgug_reporter *r, int finalize)
+{
+	char err[256];
+
+	if (r->results == NULL || (r->joblog_len == 0 && !finalize))
+		return;
+
+	err[0] = '\0';
+	if (sgug_results_job_log(r->results, r->joblog, r->joblog_len,
+	    r->joblog_lines, r->joblog_blocks_sent == 0, finalize, err,
+	    sizeof(err)) != 0)
+		fprintf(stderr, "job log upload: %s\n", err);
+
+	r->joblog_blocks_sent++;
+	r->joblog_len = 0;
+	if (r->joblog != NULL)
+		r->joblog[0] = '\0';
 }
 
 int
@@ -492,7 +571,17 @@ sgug_report_step_output(sgug_reporter *r, size_t i, const char *line)
 	 * not, and the UI adds its own. */
 	sgug_format_iso8601(sgug_now(), now, sizeof(now));
 	sgug_snprintf(stamped, sizeof(stamped), "%s %s", now, clean);
-	log_append(st, stamped);
+	log_append(&st->log, &st->log_len, &st->log_cap, stamped);
+	st->log_lines++;
+	log_append(&r->joblog, &r->joblog_len, &r->joblog_cap, stamped);
+	r->joblog_lines++;
+
+	/* Ship a block once one has accumulated, so a step that prints for an
+	 * hour costs a bounded amount of memory rather than all of it. */
+	if (st->log_len >= LOG_BLOCK)
+		flush_log_block(r, st, 0);
+	if (r->joblog_len >= LOG_BLOCK)
+		flush_job_block(r, 0);
 
 	if (st->nfeed < MAX_FEED_LINES) {
 		st->feed[st->nfeed++] = clean;
@@ -503,56 +592,169 @@ sgug_report_step_output(sgug_reporter *r, size_t i, const char *line)
 	return 0;
 }
 
+/*
+ * The batch the service expects, for the first n buffered lines of a step.
+ * Identical on both transports, which is why it is built once here.
+ *
+ * Returns the writer, which owns the returned text and must be freed by the
+ * caller once the body has been sent.
+ */
+static sgug_jsonw *
+feed_body(struct step_state *st, size_t n, const char **out, size_t *outlen)
+{
+	sgug_jsonw *w = sgug_jsonw_new();
+	size_t j;
+
+	if (w == NULL)
+		return NULL;
+
+	sgug_jsonw_obj_begin(w);
+	sgug_jsonw_key(w, "count");
+	sgug_jsonw_int(w, (int64_t)n);
+	sgug_jsonw_key(w, "value");
+	sgug_jsonw_arr_begin(w);
+	for (j = 0; j < n; j++)
+		sgug_jsonw_str(w, st->feed[j]);
+	sgug_jsonw_arr_end(w);
+	sgug_jsonw_key(w, "stepId");
+	sgug_jsonw_str(w, st->record_id);
+	sgug_jsonw_key(w, "startLine");
+	sgug_jsonw_int(w, st->lines_sent + 1);
+	sgug_jsonw_obj_end(w);
+
+	*out = sgug_jsonw_done(w, outlen);
+	return w;
+}
+
+/* Discards everything buffered, keeping the line count honest so a later batch
+ * still reports where it starts. */
+static void
+feed_drop(sgug_reporter *r)
+{
+	size_t i, j;
+
+	for (i = 0; i < r->job->nsteps; i++) {
+		struct step_state *st = &r->steps[i];
+
+		for (j = 0; j < st->nfeed; j++)
+			free(st->feed[j]);
+		st->lines_sent += (int64_t)st->nfeed;
+		st->nfeed = 0;
+	}
+}
+
+/*
+ * Pushes buffered console lines over the websocket, in batches, oldest first.
+ *
+ * Best effort throughout. The socket is opened on demand and abandoned on the
+ * first failure, which is what the official runner does: the live tail is a
+ * convenience and the uploaded log is the record.
+ */
+static int
+feed_over_socket(sgug_reporter *r)
+{
+	size_t i;
+	char err[256];
+
+	if (r->feed_off || r->job->feed_stream_url == NULL ||
+	    r->job->feed_stream_url[0] == '\0') {
+		feed_drop(r);
+		return 0;
+	}
+
+	if (sgug_monotonic_ms() < r->feed_due)
+		return 0;
+	r->feed_due = sgug_monotonic_ms() + FEED_INTERVAL_MS;
+
+	for (i = 0; i < r->job->nsteps; i++) {
+		struct step_state *st = &r->steps[i];
+
+		while (st->nfeed > 0) {
+			size_t n = st->nfeed < FEED_BATCH ? st->nfeed
+			    : FEED_BATCH;
+			const char *body = NULL;
+			size_t len = 0, j;
+			sgug_jsonw *w;
+
+			if (r->feed == NULL) {
+				err[0] = '\0';
+				r->feed = sgug_ws_connect(
+				    sgug_http_tls_ctx(r->http),
+				    r->job->feed_stream_url,
+				    r->job->access_token, SGUG_USER_AGENT,
+				    TIMEOUT_MS, err, sizeof(err));
+				if (r->feed == NULL) {
+					fprintf(stderr,
+					    "live console unavailable: %s\n",
+					    err);
+					r->feed_off = 1;
+					feed_drop(r);
+					return 0;
+				}
+			}
+
+			w = feed_body(st, n, &body, &len);
+			if (w == NULL)
+				return -1;
+
+			if (body != NULL) {
+				err[0] = '\0';
+				if (sgug_ws_send_text(r->feed, body, len,
+				    TIMEOUT_MS, err, sizeof(err)) != 0) {
+					fprintf(stderr,
+					    "live console stopped: %s\n", err);
+					r->feed_off = 1;
+					sgug_ws_free(r->feed);
+					r->feed = NULL;
+					sgug_jsonw_free(w);
+					feed_drop(r);
+					return 0;
+				}
+			}
+			sgug_jsonw_free(w);
+
+			for (j = 0; j < n; j++)
+				free(st->feed[j]);
+			memmove(st->feed, st->feed + n,
+			    (st->nfeed - n) * sizeof(st->feed[0]));
+			st->nfeed -= n;
+			st->lines_sent += (int64_t)n;
+		}
+
+		/* Answer any ping so an idle socket is not reaped. */
+		if (r->feed != NULL && sgug_ws_pump(r->feed) != 0) {
+			r->feed_off = 1;
+			sgug_ws_free(r->feed);
+			r->feed = NULL;
+		}
+	}
+	return 0;
+}
+
 int
 sgug_report_flush(sgug_reporter *r)
 {
 	size_t i, j;
 	int rc = 0;
 
-	if (!r->legacy_timeline) {
-		/* Drop what we buffered; the console feed lives on the results
-		 * service, which is not implemented yet. */
-		for (i = 0; i < r->job->nsteps; i++) {
-			struct step_state *st = &r->steps[i];
-
-			for (j = 0; j < st->nfeed; j++)
-				free(st->feed[j]);
-			st->lines_sent += (int64_t)st->nfeed;
-			st->nfeed = 0;
-		}
-		return 0;
-	}
+	if (!r->legacy_timeline)
+		return feed_over_socket(r);
 
 	for (i = 0; i < r->job->nsteps; i++) {
 		struct step_state *st = &r->steps[i];
-		sgug_jsonw *w;
 		char url[SGUG_MAX_URL];
 		char ctype[128];
 		const char *body;
 		size_t len;
+		sgug_jsonw *w;
 
 		if (st->nfeed == 0)
 			continue;
 
-		w = sgug_jsonw_new();
+		w = feed_body(st, st->nfeed, &body, &len);
 		if (w == NULL)
 			return -1;
 
-		sgug_jsonw_obj_begin(w);
-		sgug_jsonw_key(w, "count");
-		sgug_jsonw_int(w, (int64_t)st->nfeed);
-		sgug_jsonw_key(w, "value");
-		sgug_jsonw_arr_begin(w);
-		for (j = 0; j < st->nfeed; j++)
-			sgug_jsonw_str(w, st->feed[j]);
-		sgug_jsonw_arr_end(w);
-		sgug_jsonw_key(w, "stepId");
-		sgug_jsonw_str(w, st->record_id);
-		sgug_jsonw_key(w, "startLine");
-		sgug_jsonw_int(w, st->lines_sent + 1);
-		sgug_jsonw_obj_end(w);
-
-		body = sgug_jsonw_done(w, &len);
 		if (body != NULL) {
 			sgug_snprintf(url, sizeof(url),
 			    "%s/timelines/%s/records/%s/feed", r->base,
@@ -653,14 +855,10 @@ sgug_report_step_finished(sgug_reporter *r, size_t i, sgug_result result)
 
 	sgug_report_flush(r);
 
-	if (st->log_len > 0 && r->results != NULL) {
-		char uerr[256];
-
-		uerr[0] = '\0';
-		if (sgug_results_step_log(r->results, st->record_id, st->log,
-		    st->log_len, st->log_lines, uerr, sizeof(uerr)) != 0)
-			fprintf(stderr, "log upload: %s\n", uerr);
-	}
+	/* Seals the blob and registers the log, even if the last block is empty
+	 * because the output happened to end on a boundary. */
+	if (st->log_blocks_sent > 0 || st->log_len > 0)
+		flush_log_block(r, st, 1);
 
 	if (st->log_len > 0 && r->legacy_timeline) {
 		st->log_id = create_log(r);
@@ -727,37 +925,8 @@ sgug_report_job_finished(sgug_reporter *r, sgug_result result)
 	 * serve, and without it that endpoint answers BlobNotFound even though
 	 * the steps look complete.
 	 */
-	if (r->results != NULL) {
-		char *joblog = NULL;
-		size_t total = 0, off = 0;
-		int64_t lines = 0;
-
-		for (i = 0; i < r->job->nsteps; i++) {
-			total += r->steps[i].log_len;
-			lines += r->steps[i].log_lines;
-		}
-
-		if (total > 0)
-			joblog = malloc(total + 1);
-		if (joblog != NULL) {
-			char uerr[256];
-
-			for (i = 0; i < r->job->nsteps; i++) {
-				if (r->steps[i].log_len == 0)
-					continue;
-				memcpy(joblog + off, r->steps[i].log,
-				    r->steps[i].log_len);
-				off += r->steps[i].log_len;
-			}
-			joblog[off] = '\0';
-
-			uerr[0] = '\0';
-			if (sgug_results_job_log(r->results, joblog, off, lines,
-			    uerr, sizeof(uerr)) != 0)
-				fprintf(stderr, "job log upload: %s\n", uerr);
-			free(joblog);
-		}
-	}
+	if (r->joblog_blocks_sent > 0 || r->joblog_len > 0)
+		flush_job_block(r, 1);
 
 	/*
 	 * Completion goes to the run service, not the plan events route.
