@@ -268,10 +268,108 @@ field(const sgug_json *o, const char *snake, const char *camel)
 	return v;
 }
 
+/*
+ * PUTs one block to a signed blob URL.
+ *
+ * A whole log in one block is a plain BlockBlob. Otherwise it is an append
+ * blob: the first block creates it empty, every block extends it, and the last
+ * seals it so the service knows nothing more is coming. The signed URL already
+ * carries a query string, hence the & rather than ?.
+ */
+static int
+put_block(sgug_results *r, const char *url, const char *data, size_t len,
+    int first_block, int finalize, char *err, size_t errlen)
+{
+	const char *headers[3];
+	sgug_http_resp *resp = NULL;
+	/*
+	 * Not SGUG_MAX_URL. A signed blob URL carries the whole SAS in its
+	 * query string and already runs to several hundred bytes, and the
+	 * signature covers what follows: truncating it does not fail loudly,
+	 * it fails as AuthenticationFailed from Azure.
+	 */
+	char appendurl[2048];
+	size_t want;
+	int rc;
+
+	if (first_block && finalize) {
+		headers[0] = "x-ms-blob-type: BlockBlob";
+		headers[1] = "Content-Type: text/plain";
+
+		if (sgug_http_request(r->http, "PUT", url, headers, 2, data,
+		    len, TIMEOUT_MS, &resp) != 0) {
+			seterr(err, errlen, "log upload: %s",
+			    sgug_http_last_error());
+			return -1;
+		}
+		rc = sgug_http_status(resp);
+		if (rc >= 300) {
+			seterr(err, errlen, "log upload returned %d: %.200s",
+			    rc, sgug_http_body(resp, NULL));
+			sgug_http_resp_free(resp);
+			return -1;
+		}
+		sgug_http_resp_free(resp);
+		return 0;
+	}
+
+	if (first_block) {
+		headers[0] = "x-ms-blob-type: AppendBlob";
+		headers[1] = "Content-Type: text/plain";
+
+		/* Creates the blob and nothing else; the body must be empty. */
+		if (sgug_http_request(r->http, "PUT", url, headers, 2, NULL, 0,
+		    TIMEOUT_MS, &resp) != 0) {
+			seterr(err, errlen, "append blob create: %s",
+			    sgug_http_last_error());
+			return -1;
+		}
+		rc = sgug_http_status(resp);
+		if (rc >= 300) {
+			seterr(err, errlen, "append blob create returned %d: "
+			    "%.200s", rc, sgug_http_body(resp, NULL));
+			sgug_http_resp_free(resp);
+			return -1;
+		}
+		sgug_http_resp_free(resp);
+		resp = NULL;
+	}
+
+	want = strlen(url) + sizeof("&comp=appendblock&seal=true");
+	if (want > sizeof(appendurl)) {
+		seterr(err, errlen, "signed url is %lu bytes, too long to "
+		    "append to", (unsigned long)strlen(url));
+		return -1;
+	}
+	sgug_snprintf(appendurl, sizeof(appendurl), "%s&comp=appendblock%s",
+	    url, finalize ? "&seal=true" : "");
+
+	headers[0] = "Content-Type: text/plain";
+	headers[1] = finalize ? "x-ms-blob-sealed: True"
+	    : "x-ms-blob-sealed: False";
+
+	if (sgug_http_request(r->http, "PUT", appendurl, headers, 2, data, len,
+	    TIMEOUT_MS, &resp) != 0) {
+		seterr(err, errlen, "append block: %s", sgug_http_last_error());
+		return -1;
+	}
+	rc = sgug_http_status(resp);
+	if (rc >= 300) {
+		/* Azure explains itself in the body, and the code alone is not
+		 * enough to tell a permissions problem from a bad header. */
+		seterr(err, errlen, "append block returned %d: %.200s", rc,
+		    sgug_http_body(resp, NULL));
+		sgug_http_resp_free(resp);
+		return -1;
+	}
+	sgug_http_resp_free(resp);
+	return 0;
+}
+
 static int
 upload(sgug_results *r, const char *step_id, const char *geturl_method,
     const char *meta_method, const char *log, size_t len, int64_t line_count,
-    char *err, size_t errlen)
+    int first_block, int finalize, char *err, size_t errlen)
 {
 	sgug_jsonw *w = NULL;
 	sgug_http_resp *resp = NULL;
@@ -282,10 +380,16 @@ upload(sgug_results *r, const char *step_id, const char *geturl_method,
 	size_t body_len;
 	int rc = -1;
 
-	if (r == NULL || len == 0)
+	/*
+	 * An empty non-final block is nothing to say. An empty final one still
+	 * has to go, or a log whose last block landed exactly on the boundary
+	 * is never sealed and never registered.
+	 */
+	if (r == NULL || (len == 0 && !finalize))
 		return 0;
 
-	/* 1. Ask for somewhere to put it. */
+	/* 1. Ask for somewhere to put it. A fresh signed URL per block: they
+	 * expire, and the blob they name is the same one each time. */
 	w = sgug_jsonw_new();
 	if (w == NULL)
 		return -1;
@@ -320,38 +424,27 @@ upload(sgug_results *r, const char *step_id, const char *geturl_method,
 	/*
 	 * 2. PUT the bytes. No Authorization header: the URL is already a
 	 * signed SAS, and sending a bearer token alongside it is rejected.
-	 * BlockBlob uploads the whole log at once; AppendBlob would be the
-	 * streaming variant.
 	 */
-	{
-		const char *blob_headers[2];
-		sgug_http_resp *put = NULL;
-
-		blob_headers[0] = "x-ms-blob-type: BlockBlob";
-		blob_headers[1] = "Content-Type: text/plain";
-
-		if (sgug_http_request(r->http, "PUT", signed_url, blob_headers, 2,
-		    log, len, TIMEOUT_MS, &put) != 0) {
-			seterr(err, errlen, "blob upload: %s",
-			    sgug_http_last_error());
-			goto out;
-		}
-		if (sgug_http_status(put) >= 300) {
-			seterr(err, errlen, "blob upload returned %d",
-			    sgug_http_status(put));
-			sgug_http_resp_free(put);
-			goto out;
-		}
-		sgug_http_resp_free(put);
-	}
+	if (put_block(r, signed_url, log, len, first_block, finalize, err,
+	    errlen) != 0)
+		goto out;
 
 	sgug_json_free(doc);
 	doc = NULL;
 	sgug_http_resp_free(resp);
 	resp = NULL;
 	sgug_jsonw_free(w);
+	w = NULL;
 
-	/* 3. Register it, which is what makes the log appear. */
+	/*
+	 * 3. Register it, which is what makes the log appear. Only once, on the
+	 * final block: the service counts this as the log being complete.
+	 */
+	if (!finalize) {
+		rc = 0;
+		goto out;
+	}
+
 	w = sgug_jsonw_new();
 	if (w == NULL)
 		return -1;
@@ -387,19 +480,22 @@ out:
 
 int
 sgug_results_step_log(sgug_results *r, const char *step_id, const char *log,
-    size_t len, int64_t line_count, char *err, size_t errlen)
+    size_t len, int64_t line_count, int first_block, int finalize, char *err,
+    size_t errlen)
 {
 	return upload(r, step_id, "GetStepLogsSignedBlobURL",
-	    "CreateStepLogsMetadata", log, len, line_count, err, errlen);
+	    "CreateStepLogsMetadata", log, len, line_count, first_block,
+	    finalize, err, errlen);
 }
 
 int
 sgug_results_job_log(sgug_results *r, const char *log, size_t len,
-    int64_t line_count, char *err, size_t errlen)
+    int64_t line_count, int first_block, int finalize, char *err, size_t errlen)
 {
 	/* No step id: the job-level request carries only the two run ids. */
 	return upload(r, NULL, "GetJobLogsSignedBlobURL",
-	    "CreateJobLogsMetadata", log, len, line_count, err, errlen);
+	    "CreateJobLogsMetadata", log, len, line_count, first_block,
+	    finalize, err, errlen);
 }
 
 /* sha256 of a file, lowercase hex. The service compares it on finalize. */
