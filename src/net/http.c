@@ -305,6 +305,12 @@ sgug_http_client_free(sgug_http_client *c)
 	free(c);
 }
 
+sgug_tls_ctx *
+sgug_http_tls_ctx(sgug_http_client *c)
+{
+	return c != NULL ? c->tls_ctx : NULL;
+}
+
 static int
 ensure_conn(sgug_http_client *c, const struct url *u, int timeout_ms)
 {

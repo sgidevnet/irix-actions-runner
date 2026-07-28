@@ -2,6 +2,7 @@
 #define SGUG_NET_HTTP_H
 
 #include "compat/irix.h"
+#include "net/tls.h"
 
 #include <stddef.h>
 
@@ -22,6 +23,13 @@ typedef struct sgug_http_resp sgug_http_resp;
 sgug_http_client *sgug_http_client_new(const char *ca_bundle,
     const char *user_agent);
 void sgug_http_client_free(sgug_http_client *c);
+
+/*
+ * The client's TLS context, so another connection can share the trust store
+ * rather than parse it again. Loading a CA bundle is not free on these
+ * machines. Borrowed: it dies with the client.
+ */
+sgug_tls_ctx *sgug_http_tls_ctx(sgug_http_client *c);
 
 /*
  * headers is an array of "Name: value" strings, nheaders long. body may be
