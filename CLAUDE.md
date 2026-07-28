@@ -284,9 +284,9 @@ prefixes where they fit.
 into three logical commits is `[1/3]`, `[2/3]`, `[3/3]`. It is not a running
 counter across the project. A standalone commit carries no counter.
 
-The author is David Stancu. Never add a Claude co-author trailer, a
-"Generated with" footer, or any other tool attribution, to a commit message or
-a pull request body.
+Never add a Claude co-author trailer, a "Generated with" footer, or any other
+tool attribution, to a commit message or a pull request body. Commit as the
+repository's configured git identity; do not pass `-c user.email`.
 
 A human reviews every pull request. Write the body for that reader: what
 changed, why, and what was verified. State what you did not test.
