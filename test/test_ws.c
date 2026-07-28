@@ -146,9 +146,9 @@ test_mask_round_trip(void)
 	char buf[32];
 
 	memcpy(buf, "Hello", 5);
-	sgug_ws_mask((unsigned char *)buf, 5, MASK, 0);
+	sgug_ws_mask((unsigned char *)buf, 5, MASK);
 	CHECK(memcmp(buf, "Hello", 5) != 0);
-	sgug_ws_mask((unsigned char *)buf, 5, MASK, 0);
+	sgug_ws_mask((unsigned char *)buf, 5, MASK);
 	CHECK(memcmp(buf, "Hello", 5) == 0);
 }
 
@@ -161,38 +161,77 @@ test_mask_vector(void)
 	unsigned char buf[5];
 
 	memcpy(buf, "Hello", 5);
-	sgug_ws_mask(buf, 5, MASK, 0);
+	sgug_ws_mask(buf, 5, MASK);
 	CHECK(memcmp(buf, WANT, 5) == 0);
 }
 
 /*
- * The offset argument exists because a message is masked in fragments but the
- * key cycles over the whole payload, so a fragment starting mid-key must not
- * restart it.
+ * Fragmentation. A message exactly one fragment long must stay a single frame:
+ * an empty trailing continuation is legal but the reference never emits one.
  */
 static void
-test_mask_offset_continues_the_key(void)
+test_fragmentation(void)
 {
-	static const unsigned char MASK[4] = { 0x37, 0xfa, 0x21, 0x3d };
-	unsigned char whole[9], split[9];
+	size_t chunk;
+	int fin, opcode;
 
-	memcpy(whole, "HelloABCD", 9);
-	sgug_ws_mask(whole, 9, MASK, 0);
+	sgug_ws_next_fragment(0, 0, &chunk, &fin, &opcode);
+	CHECK_EQ_INT(chunk, 0);
+	CHECK_EQ_INT(fin, 1);
+	CHECK_EQ_INT(opcode, SGUG_WS_OP_TEXT);
 
-	memcpy(split, "HelloABCD", 9);
-	sgug_ws_mask(split, 5, MASK, 0);
-	sgug_ws_mask(split + 5, 4, MASK, 5);
+	sgug_ws_next_fragment(1, 0, &chunk, &fin, &opcode);
+	CHECK_EQ_INT(chunk, 1);
+	CHECK_EQ_INT(fin, 1);
 
-	CHECK(memcmp(whole, split, 9) == 0);
+	sgug_ws_next_fragment(1023, 0, &chunk, &fin, &opcode);
+	CHECK_EQ_INT(chunk, 1023);
+	CHECK_EQ_INT(fin, 1);
+
+	/* Exactly one fragment: one frame, FIN set, no continuation. */
+	sgug_ws_next_fragment(1024, 0, &chunk, &fin, &opcode);
+	CHECK_EQ_INT(chunk, 1024);
+	CHECK_EQ_INT(fin, 1);
+	CHECK_EQ_INT(opcode, SGUG_WS_OP_TEXT);
+
+	/* One byte more needs a continuation, and only the second is final. */
+	sgug_ws_next_fragment(1025, 0, &chunk, &fin, &opcode);
+	CHECK_EQ_INT(chunk, 1024);
+	CHECK_EQ_INT(fin, 0);
+	CHECK_EQ_INT(opcode, SGUG_WS_OP_TEXT);
+	sgug_ws_next_fragment(1025, 1024, &chunk, &fin, &opcode);
+	CHECK_EQ_INT(chunk, 1);
+	CHECK_EQ_INT(fin, 1);
+	CHECK_EQ_INT(opcode, SGUG_WS_OP_CONT);
+
+	/* A three-fragment message: only the last carries FIN. */
+	sgug_ws_next_fragment(2048, 1024, &chunk, &fin, &opcode);
+	CHECK_EQ_INT(chunk, 1024);
+	CHECK_EQ_INT(fin, 1);
+	CHECK_EQ_INT(opcode, SGUG_WS_OP_CONT);
+	sgug_ws_next_fragment(3000, 1024, &chunk, &fin, &opcode);
+	CHECK_EQ_INT(chunk, 1024);
+	CHECK_EQ_INT(fin, 0);
 }
 
-/* A payload of exactly the fragment size must stay one frame, not become two
- * with an empty continuation. */
+/* The masking key follows the length, wherever the length happened to end. */
 static void
-test_fragment_boundary(void)
+test_mask_key_position(void)
 {
-	CHECK_EQ_INT(SGUG_WS_FRAGMENT, 1024);
-	CHECK(SGUG_WS_FRAGMENT % 4 == 0);
+	static const unsigned char MASK[4] = { 0xaa, 0xbb, 0xcc, 0xdd };
+	unsigned char h[SGUG_WS_MAX_HEADER];
+
+	sgug_ws_frame_header(h, SGUG_WS_OP_TEXT, 1, 10, MASK);
+	CHECK_EQ_INT(h[2], 0xaa);
+	CHECK_EQ_INT(h[5], 0xdd);
+
+	sgug_ws_frame_header(h, SGUG_WS_OP_TEXT, 1, 1000, MASK);
+	CHECK_EQ_INT(h[4], 0xaa);
+	CHECK_EQ_INT(h[7], 0xdd);
+
+	sgug_ws_frame_header(h, SGUG_WS_OP_TEXT, 1, 0x100000000ULL, MASK);
+	CHECK_EQ_INT(h[10], 0xaa);
+	CHECK_EQ_INT(h[13], 0xdd);
 }
 
 int
@@ -204,8 +243,8 @@ main(void)
 	test_mask_bit_and_opcodes();
 	test_mask_round_trip();
 	test_mask_vector();
-	test_mask_offset_continues_the_key();
-	test_fragment_boundary();
+	test_fragmentation();
+	test_mask_key_position();
 
 	if (failures != 0) {
 		printf("\n%d failure(s)\n", failures);

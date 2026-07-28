@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* RFC 6455 section 1.3. Concatenated with the client key to derive the accept
  * value, and the only reason a SHA-1 lives in this tree. */
@@ -69,13 +70,28 @@ sgug_ws_frame_header(unsigned char *out, int opcode, int fin,
 }
 
 void
-sgug_ws_mask(unsigned char *buf, size_t len, const unsigned char mask[4],
-    size_t offset)
+sgug_ws_mask(unsigned char *buf, size_t len, const unsigned char mask[4])
 {
 	size_t i;
 
 	for (i = 0; i < len; i++)
-		buf[i] ^= mask[(offset + i) & 3];
+		buf[i] ^= mask[i & 3];
+}
+
+void
+sgug_ws_next_fragment(size_t len, size_t off, size_t *chunk, int *fin,
+    int *opcode)
+{
+	size_t n = len - off;
+
+	if (n > SGUG_WS_FRAGMENT)
+		n = SGUG_WS_FRAGMENT;
+
+	*chunk = n;
+	/* A message exactly one fragment long is one frame, not a frame plus an
+	 * empty continuation. */
+	*fin = off + n >= len;
+	*opcode = off == 0 ? SGUG_WS_OP_TEXT : SGUG_WS_OP_CONT;
 }
 
 int
@@ -134,7 +150,12 @@ parse_url(const char *url, char *host, size_t hostlen, int *port,
 		}
 	}
 
-	sgug_snprintf(path, pathlen, "%s", slash != NULL ? slash : "/");
+	p = slash != NULL ? slash : "/";
+	if (strlen(p) >= pathlen) {
+		seterr(err, errlen, "url path too long");
+		return -1;
+	}
+	sgug_snprintf(path, pathlen, "%s", p);
 	return 0;
 }
 
@@ -203,6 +224,15 @@ handshake(sgug_ws *ws, const char *host, const char *path, const char *token,
 		    "Authorization: Bearer %s\r\n", token);
 	off += (size_t)sgug_snprintf(req + off, sizeof(req) - off, "\r\n");
 
+	/* sgug_snprintf truncates rather than reporting overflow, so a token
+	 * larger than the buffer would send a request with no header
+	 * terminator and the server would simply hang up. */
+	if (off < 4 || memcmp(req + off - 4, "\r\n\r\n", 4) != 0) {
+		seterr(err, errlen, "upgrade request does not fit in %lu bytes",
+		    (unsigned long)sizeof(req));
+		return -1;
+	}
+
 	if (sgug_tls_write(ws->conn, req, off) < 0) {
 		seterr(err, errlen, "upgrade request: %s", sgug_tls_last_error());
 		return -1;
@@ -252,9 +282,16 @@ handshake(sgug_ws *ws, const char *host, const char *path, const char *token,
 	while (*accept == ' ' || *accept == '\t')
 		accept++;
 
-	if (strncmp(accept, want, strlen(want)) != 0) {
-		seterr(err, errlen, "upgrade accept key did not match");
-		return -1;
+	{
+		size_t wlen = strlen(want);
+		char end;
+
+		end = accept[wlen];
+		if (strncmp(accept, want, wlen) != 0 ||
+		    (end != '\r' && end != '\n' && end != ' ' && end != '\t')) {
+			seterr(err, errlen, "upgrade accept key did not match");
+			return -1;
+		}
 	}
 	return 0;
 }
@@ -276,8 +313,10 @@ sgug_ws_connect(sgug_tls_ctx *ctx, const char *url, const char *token,
 		return NULL;
 
 	ws = calloc(1, sizeof(*ws));
-	if (ws == NULL)
+	if (ws == NULL) {
+		seterr(err, errlen, "out of memory");
 		return NULL;
+	}
 
 	fd = sgug_tcp_connect(host, port, timeout_ms);
 	if (fd < 0) {
@@ -290,7 +329,10 @@ sgug_ws_connect(sgug_tls_ctx *ctx, const char *url, const char *token,
 
 	ws->conn = sgug_tls_connect(ctx, fd, host);
 	if (ws->conn == NULL) {
+		/* Ownership of fd transfers only on success, and two of the
+		 * failure paths run before it is handed over at all. */
 		seterr(err, errlen, "tls: %s", sgug_tls_last_error());
+		close(fd);
 		free(ws);
 		return NULL;
 	}
@@ -301,6 +343,39 @@ sgug_ws_connect(sgug_tls_ctx *ctx, const char *url, const char *token,
 		return NULL;
 	}
 	return ws;
+}
+
+/*
+ * Waits for the socket to accept a write.
+ *
+ * IRIX rejects SO_SNDTIMEO, so the descriptor is fully blocking and a peer that
+ * stops reading would otherwise stall SSL_write indefinitely. This runs on the
+ * thread draining the child's pipe, so that stalls the step itself: a feed that
+ * exists to be a convenience must never be able to wedge a job. Bounding the
+ * wait does not make a mid-write stall impossible, only unlikely, since a frame
+ * is at most SGUG_WS_FRAGMENT plus a header.
+ */
+static int
+wait_writable(sgug_ws *ws, int timeout_ms)
+{
+	struct pollfd pfd;
+	int64_t deadline = sgug_monotonic_ms() + timeout_ms;
+
+	for (;;) {
+		int pr;
+
+		pfd.fd = sgug_tls_fd(ws->conn);
+		pfd.events = POLLOUT;
+		pfd.revents = 0;
+
+		pr = poll(&pfd, 1, READ_SLICE_MS);
+		if (pr > 0)
+			return 0;
+		if (pr < 0 && errno != EINTR)
+			return -1;
+		if (sgug_monotonic_ms() >= deadline)
+			return -1;
+	}
 }
 
 static int
@@ -321,10 +396,12 @@ send_frame(sgug_ws *ws, int opcode, int fin, const void *payload, size_t len,
 
 	if (len > 0) {
 		body = malloc(len);
-		if (body == NULL)
+		if (body == NULL) {
+			seterr(err, errlen, "out of memory");
 			return -1;
+		}
 		memcpy(body, payload, len);
-		sgug_ws_mask(body, len, mask, 0);
+		sgug_ws_mask(body, len, mask);
 	}
 
 	/*
@@ -348,10 +425,15 @@ sgug_ws_send_text(sgug_ws *ws, const char *text, size_t len, int timeout_ms,
 {
 	size_t off = 0;
 
-	(void)timeout_ms;
-
 	if (ws == NULL || ws->closed) {
 		seterr(err, errlen, "socket is closed");
+		return -1;
+	}
+
+	if (wait_writable(ws, timeout_ms) != 0) {
+		seterr(err, errlen, "socket did not accept a write in %d ms",
+		    timeout_ms);
+		ws->closed = 1;
 		return -1;
 	}
 
@@ -361,15 +443,13 @@ sgug_ws_send_text(sgug_ws *ws, const char *text, size_t len, int timeout_ms,
 	 * removes a class of question that is expensive to answer remotely.
 	 */
 	do {
-		size_t chunk = len - off;
-		int fin;
+		size_t chunk;
+		int fin, opcode;
 
-		if (chunk > SGUG_WS_FRAGMENT)
-			chunk = SGUG_WS_FRAGMENT;
-		fin = off + chunk >= len;
+		sgug_ws_next_fragment(len, off, &chunk, &fin, &opcode);
 
-		if (send_frame(ws, off == 0 ? SGUG_WS_OP_TEXT : SGUG_WS_OP_CONT,
-		    fin, text + off, chunk, err, errlen) != 0) {
+		if (send_frame(ws, opcode, fin, text + off, chunk, err,
+		    errlen) != 0) {
 			ws->closed = 1;
 			return -1;
 		}
@@ -377,66 +457,6 @@ sgug_ws_send_text(sgug_ws *ws, const char *text, size_t len, int timeout_ms,
 	} while (off < len);
 
 	return 0;
-}
-
-int
-sgug_ws_pump(sgug_ws *ws)
-{
-	unsigned char buf[512];
-	int n;
-
-	if (ws == NULL || ws->closed)
-		return -1;
-
-	/*
-	 * Only what is already buffered or immediately readable. The reference
-	 * client never reads at all; this exists so a ping is answered and a
-	 * close is noticed rather than surfacing later as a write error.
-	 */
-	for (;;) {
-		struct pollfd pfd;
-		size_t paylen;
-		int opcode;
-
-		if (sgug_tls_pending(ws->conn) == 0) {
-			pfd.fd = sgug_tls_fd(ws->conn);
-			pfd.events = POLLIN;
-			pfd.revents = 0;
-			if (poll(&pfd, 1, 0) <= 0)
-				return 0;
-		}
-
-		n = sgug_tls_read(ws->conn, buf, sizeof(buf));
-		if (n == SGUG_TLS_TIMEOUT)
-			return 0;
-		if (n <= 0) {
-			ws->closed = 1;
-			return -1;
-		}
-		if (n < 2)
-			return 0;
-
-		opcode = buf[0] & 0x0f;
-		paylen = buf[1] & 0x7f;
-
-		if (opcode == SGUG_WS_OP_CLOSE) {
-			ws->closed = 1;
-			return -1;
-		}
-		if (opcode == SGUG_WS_OP_PING) {
-			char e[128];
-
-			/* Server frames are unmasked, so the payload starts at
-			 * byte 2 for any length a ping is allowed to carry. */
-			if (paylen > 125 || (size_t)n < 2 + paylen)
-				return 0;
-			if (send_frame(ws, SGUG_WS_OP_PONG, 1, buf + 2, paylen,
-			    e, sizeof(e)) != 0) {
-				ws->closed = 1;
-				return -1;
-			}
-		}
-	}
 }
 
 void

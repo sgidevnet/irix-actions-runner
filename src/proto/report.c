@@ -27,6 +27,9 @@
 #define FEED_BATCH 100
 #define FEED_INTERVAL_MS 500
 
+/* Consecutive failures before the feed is abandoned for the rest of the job. */
+#define FEED_MAX_FAILURES 3
+
 /* Log block size. Above this the log is streamed to an append blob instead of
  * being held whole, which bounds what one noisy step can cost in memory. */
 #define LOG_BLOCK (2 * 1024 * 1024)
@@ -43,11 +46,14 @@ struct step_state {
 	char *log;
 	size_t log_len;
 	size_t log_cap;
-	int log_blocks_sent;
+	int log_blob_created;
 	/* Pending console lines, flushed periodically. */
 	char *feed[MAX_FEED_LINES];
 	size_t nfeed;
-	int64_t lines_sent;
+	/* Absolute 1-based log line number of feed[0]. Reset from log_lines
+	 * whenever the buffer empties, so lines dropped while it was full do not
+	 * shift later batches on top of output the UI has already drawn. */
+	int64_t feed_base;
 };
 
 struct sgug_reporter {
@@ -77,6 +83,7 @@ struct sgug_reporter {
 	 * first failure; the uploaded log is what actually has to arrive. */
 	sgug_ws *feed;
 	int feed_off;
+	int feed_failures;
 	int64_t feed_due;
 
 	/*
@@ -88,7 +95,7 @@ struct sgug_reporter {
 	size_t joblog_len;
 	size_t joblog_cap;
 	int64_t joblog_lines;
-	int joblog_blocks_sent;
+	int joblog_blob_created;
 
 	char err[512];
 };
@@ -518,11 +525,16 @@ flush_log_block(sgug_reporter *r, struct step_state *st, int finalize)
 
 	err[0] = '\0';
 	if (sgug_results_step_log(r->results, st->record_id, st->log,
-	    st->log_len, st->log_lines, st->log_blocks_sent == 0, finalize,
-	    err, sizeof(err)) != 0)
+	    st->log_len, st->log_lines, !st->log_blob_created, finalize,
+	    err, sizeof(err)) != 0) {
 		fprintf(stderr, "log upload: %s\n", err);
+	} else {
+		/* Only on success. Recording the blob as created after a failed
+		 * create makes every later block skip it and append to nothing,
+		 * which loses the whole log rather than one block of it. */
+		st->log_blob_created = 1;
+	}
 
-	st->log_blocks_sent++;
 	st->log_len = 0;
 	if (st->log != NULL)
 		st->log[0] = '\0';
@@ -538,11 +550,12 @@ flush_job_block(sgug_reporter *r, int finalize)
 
 	err[0] = '\0';
 	if (sgug_results_job_log(r->results, r->joblog, r->joblog_len,
-	    r->joblog_lines, r->joblog_blocks_sent == 0, finalize, err,
+	    r->joblog_lines, !r->joblog_blob_created, finalize, err,
 	    sizeof(err)) != 0)
 		fprintf(stderr, "job log upload: %s\n", err);
+	else
+		r->joblog_blob_created = 1;
 
-	r->joblog_blocks_sent++;
 	r->joblog_len = 0;
 	if (r->joblog != NULL)
 		r->joblog[0] = '\0';
@@ -564,11 +577,9 @@ sgug_report_step_output(sgug_reporter *r, size_t i, const char *line)
 	if (clean == NULL)
 		return -1;
 
-	if (strlen(clean) > MAX_LINE)
-		clean[MAX_LINE] = '\0';
-
-	/* The persisted log carries a timestamp per line; the live feed does
-	 * not, and the UI adds its own. */
+	/* The persisted log carries a timestamp per line and the whole line; the
+	 * live feed carries neither, since the UI stamps its own and truncates
+	 * long lines the way the official runner does. */
 	sgug_format_iso8601(sgug_now(), now, sizeof(now));
 	sgug_snprintf(stamped, sizeof(stamped), "%s %s", now, clean);
 	log_append(&st->log, &st->log_len, &st->log_cap, stamped);
@@ -584,6 +595,10 @@ sgug_report_step_output(sgug_reporter *r, size_t i, const char *line)
 		flush_job_block(r, 0);
 
 	if (st->nfeed < MAX_FEED_LINES) {
+		if (strlen(clean) > MAX_LINE)
+			sgug_snprintf(clean + MAX_LINE - 3, 4, "...");
+		if (st->nfeed == 0)
+			st->feed_base = st->log_lines;
 		st->feed[st->nfeed++] = clean;
 	} else {
 		/* Live output is best effort. The uploaded log still has it. */
@@ -619,7 +634,7 @@ feed_body(struct step_state *st, size_t n, const char **out, size_t *outlen)
 	sgug_jsonw_key(w, "stepId");
 	sgug_jsonw_str(w, st->record_id);
 	sgug_jsonw_key(w, "startLine");
-	sgug_jsonw_int(w, st->lines_sent + 1);
+	sgug_jsonw_int(w, st->feed_base);
 	sgug_jsonw_obj_end(w);
 
 	*out = sgug_jsonw_done(w, outlen);
@@ -638,7 +653,6 @@ feed_drop(sgug_reporter *r)
 
 		for (j = 0; j < st->nfeed; j++)
 			free(st->feed[j]);
-		st->lines_sent += (int64_t)st->nfeed;
 		st->nfeed = 0;
 	}
 }
@@ -662,10 +676,6 @@ feed_over_socket(sgug_reporter *r)
 		return 0;
 	}
 
-	if (sgug_monotonic_ms() < r->feed_due)
-		return 0;
-	r->feed_due = sgug_monotonic_ms() + FEED_INTERVAL_MS;
-
 	for (i = 0; i < r->job->nsteps; i++) {
 		struct step_state *st = &r->steps[i];
 
@@ -684,13 +694,15 @@ feed_over_socket(sgug_reporter *r)
 				    r->job->access_token, SGUG_USER_AGENT,
 				    TIMEOUT_MS, err, sizeof(err));
 				if (r->feed == NULL) {
-					fprintf(stderr,
-					    "live console unavailable: %s\n",
-					    err);
-					r->feed_off = 1;
+					if (r->feed_failures++ == 0)
+						fprintf(stderr, "live console "
+						    "unavailable: %s\n", err);
+					if (r->feed_failures >= FEED_MAX_FAILURES)
+						r->feed_off = 1;
 					feed_drop(r);
 					return 0;
 				}
+				r->feed_failures = 0;
 			}
 
 			w = feed_body(st, n, &body, &len);
@@ -701,9 +713,15 @@ feed_over_socket(sgug_reporter *r)
 				err[0] = '\0';
 				if (sgug_ws_send_text(r->feed, body, len,
 				    TIMEOUT_MS, err, sizeof(err)) != 0) {
-					fprintf(stderr,
-					    "live console stopped: %s\n", err);
-					r->feed_off = 1;
+					/* Drop the socket but keep the feed
+					 * alive: the next flush reconnects,
+					 * which is what the reference does
+					 * rather than giving up on one blip. */
+					if (r->feed_failures++ == 0)
+						fprintf(stderr, "live console "
+						    "interrupted: %s\n", err);
+					if (r->feed_failures >= FEED_MAX_FAILURES)
+						r->feed_off = 1;
 					sgug_ws_free(r->feed);
 					r->feed = NULL;
 					sgug_jsonw_free(w);
@@ -718,24 +736,26 @@ feed_over_socket(sgug_reporter *r)
 			memmove(st->feed, st->feed + n,
 			    (st->nfeed - n) * sizeof(st->feed[0]));
 			st->nfeed -= n;
-			st->lines_sent += (int64_t)n;
-		}
-
-		/* Answer any ping so an idle socket is not reaped. */
-		if (r->feed != NULL && sgug_ws_pump(r->feed) != 0) {
-			r->feed_off = 1;
-			sgug_ws_free(r->feed);
-			r->feed = NULL;
+			st->feed_base += (int64_t)n;
 		}
 	}
 	return 0;
 }
 
-int
-sgug_report_flush(sgug_reporter *r)
+/*
+ * force skips the rate limit, for the last push of a step or a job. Without it
+ * the tail of the final step is buffered and then thrown away, which is exactly
+ * the output someone is watching for.
+ */
+static int
+report_flush(sgug_reporter *r, int force)
 {
 	size_t i, j;
 	int rc = 0;
+
+	if (!force && sgug_monotonic_ms() < r->feed_due)
+		return 0;
+	r->feed_due = sgug_monotonic_ms() + FEED_INTERVAL_MS;
 
 	if (!r->legacy_timeline)
 		return feed_over_socket(r);
@@ -768,7 +788,7 @@ sgug_report_flush(sgug_reporter *r)
 				rc = 0;
 		}
 
-		st->lines_sent += (int64_t)st->nfeed;
+		st->feed_base += (int64_t)st->nfeed;
 		for (j = 0; j < st->nfeed; j++)
 			free(st->feed[j]);
 		st->nfeed = 0;
@@ -776,6 +796,12 @@ sgug_report_flush(sgug_reporter *r)
 		sgug_jsonw_free(w);
 	}
 	return rc;
+}
+
+int
+sgug_report_flush(sgug_reporter *r)
+{
+	return report_flush(r, 0);
 }
 
 /* Creates a log container and returns its id, or -1. */
@@ -853,11 +879,11 @@ sgug_report_step_finished(sgug_reporter *r, size_t i, sgug_result result)
 		return -1;
 	st = &r->steps[i];
 
-	sgug_report_flush(r);
+	report_flush(r, 1);
 
 	/* Seals the blob and registers the log, even if the last block is empty
 	 * because the output happened to end on a boundary. */
-	if (st->log_blocks_sent > 0 || st->log_len > 0)
+	if (st->log_blob_created || st->log_len > 0)
 		flush_log_block(r, st, 1);
 
 	if (st->log_len > 0 && r->legacy_timeline) {
@@ -925,7 +951,9 @@ sgug_report_job_finished(sgug_reporter *r, sgug_result result)
 	 * serve, and without it that endpoint answers BlobNotFound even though
 	 * the steps look complete.
 	 */
-	if (r->joblog_blocks_sent > 0 || r->joblog_len > 0)
+	report_flush(r, 1);
+
+	if (r->joblog_blob_created || r->joblog_len > 0)
 		flush_job_block(r, 1);
 
 	/*

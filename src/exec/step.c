@@ -224,6 +224,27 @@ spawn(const char *const *argv, const char *cwd, const sgug_step_opts *opts,
 			break;
 		}
 
+		/*
+		 * Cancellation and the deadline are checked every iteration,
+		 * not only when poll times out. A step printing continuously
+		 * always takes the branch below and would otherwise be
+		 * uncancellable and unable to time out.
+		 */
+		if (!killed && opts->abort_cb != NULL &&
+		    opts->abort_cb(opts->abort_ctx) != 0) {
+			kill(pid, SIGTERM);
+			killed = 1;
+		} else if (!killed && deadline != 0 &&
+		    sgug_monotonic_ms() >= deadline) {
+			if (on_line != NULL)
+				on_line(ctx, "step timed out");
+			kill(pid, SIGTERM);
+			killed = 1;
+		}
+
+		if (opts->tick_cb != NULL)
+			opts->tick_cb(opts->tick_ctx);
+
 		if (pr > 0) {
 			n = read(pipefd[0], buf + held, sizeof(buf) - held - 1);
 			if (n < 0) {
@@ -237,11 +258,6 @@ spawn(const char *const *argv, const char *cwd, const sgug_step_opts *opts,
 			held += (size_t)n;
 			held = drain_lines(buf, held, on_line, ctx);
 
-			/* A step producing output continuously never reaches
-			 * the poll timeout below, so tick here too. */
-			if (opts->tick_cb != NULL)
-				opts->tick_cb(opts->tick_ctx);
-
 			/*
 			 * A line longer than the buffer is emitted in pieces
 			 * rather than growing without bound, which a runaway
@@ -253,25 +269,6 @@ spawn(const char *const *argv, const char *cwd, const sgug_step_opts *opts,
 					on_line(ctx, buf);
 				held = 0;
 			}
-			continue;
-		}
-
-		/* Timed out or interrupted. */
-		if (opts->tick_cb != NULL)
-			opts->tick_cb(opts->tick_ctx);
-
-		if (!killed && opts->abort_cb != NULL &&
-		    opts->abort_cb(opts->abort_ctx) != 0) {
-			kill(pid, SIGTERM);
-			killed = 1;
-			continue;
-		}
-		if (!killed && deadline != 0 && sgug_monotonic_ms() >= deadline) {
-			if (on_line != NULL)
-				on_line(ctx, "step timed out");
-			kill(pid, SIGTERM);
-			killed = 1;
-			continue;
 		}
 	}
 

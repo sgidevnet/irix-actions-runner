@@ -344,11 +344,12 @@ put_block(sgug_results *r, const char *url, const char *data, size_t len,
 	sgug_snprintf(appendurl, sizeof(appendurl), "%s&comp=appendblock%s",
 	    url, finalize ? "&seal=true" : "");
 
-	headers[0] = "Content-Type: text/plain";
-	headers[1] = finalize ? "x-ms-blob-sealed: True"
+	/* No Content-Type: the reference sends only the sealed header here, and
+	 * Azure takes the type from the blob rather than the append. */
+	headers[0] = finalize ? "x-ms-blob-sealed: True"
 	    : "x-ms-blob-sealed: False";
 
-	if (sgug_http_request(r->http, "PUT", appendurl, headers, 2, data, len,
+	if (sgug_http_request(r->http, "PUT", appendurl, headers, 1, data, len,
 	    TIMEOUT_MS, &resp) != 0) {
 		seterr(err, errlen, "append block: %s", sgug_http_last_error());
 		return -1;
@@ -425,7 +426,10 @@ upload(sgug_results *r, const char *step_id, const char *geturl_method,
 	 * 2. PUT the bytes. No Authorization header: the URL is already a
 	 * signed SAS, and sending a bearer token alongside it is rejected.
 	 */
-	if (put_block(r, signed_url, log, len, first_block, finalize, err,
+	/* A zero-length append is rejected, and there is nothing to append
+	 * anyway; the blob is already complete and only needs registering. */
+	if ((len > 0 || first_block) &&
+	    put_block(r, signed_url, log, len, first_block, finalize, err,
 	    errlen) != 0)
 		goto out;
 

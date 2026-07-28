@@ -425,7 +425,14 @@ runner opens it once per job and writes one JSON text message per batch.
 ```
 
 camelCase, and `startLine` is the number of the batch's first line. Batches
-carry at most 100 lines for one step, pushed every 250 to 500 ms.
+carry at most 100 lines for one step. The reference pushes every 250 ms for the
+first minute and every 500 ms after that, and drains at most 500 lines per
+cycle.
+
+`startLine` is captured when the line is written, not when the batch is sent,
+and before the queue's overflow check. Deriving it from what has been sent
+instead makes every batch after a drop land on top of output the UI has already
+drawn.
 
 | | |
 |---|---|
@@ -435,7 +442,7 @@ carry at most 100 lines for one step, pushed every 250 to 500 ms.
 | Direction | the client only sends. `ResultsServer.cs` has no receive call |
 | Keepalive | none configured, no application ping |
 | Close | `CloseOutputAsync`, normal closure, reply not awaited |
-| On failure | lines are dropped, the socket is abandoned, the job continues |
+| On failure | the reference retries a chunk three times with 100 to 500 ms backoff, reconnecting between attempts, and tries a fresh connection again after ten minutes |
 
 The client never reading is worth relying on: nothing the server sends has to
 be parsed for correctness. Answering a ping is still worth doing, since an

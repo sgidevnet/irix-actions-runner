@@ -66,7 +66,7 @@ $(BUILD)/%.o: %.c
 # The %z grep is not style policing: IRIX libc printf does not consume the
 # argument, which corrupts varargs parsing and segfaults on a following %s.
 check:
-	@! grep -rn '%[0-9.]*z[udixX]' src/ test/ \
+	@! grep -rn '%[-+ #0-9.*]*z[udixX]' src/ test/ \
 	  || { echo "error: %z format specifier segfaults on IRIX, see CLAUDE.md"; exit 1; }
 	@echo "ok: no %z format specifiers"
 ifeq ($(UNAME_S),IRIX64)

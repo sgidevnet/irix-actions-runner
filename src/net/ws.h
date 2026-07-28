@@ -10,9 +10,9 @@
  * A send-only WebSocket client, RFC 6455, for the Actions live console feed.
  *
  * The official runner never reads from this socket: it opens it, writes batches
- * of console lines, and closes it. Nothing the server sends is required for
- * correctness, so the read side here exists only to answer pings and to notice
- * a close, which an intermediary may otherwise take as a dead peer.
+ * of console lines, and closes it. This does the same. Nothing the server sends
+ * has to be parsed, and a socket the peer has closed surfaces as a failed send,
+ * so there is no receive path to keep in sync with the sender.
  *
  * The feed is best effort by design. Every failure is terminal for the socket
  * and harmless for the job: the uploaded log remains the authoritative copy.
@@ -35,12 +35,6 @@ sgug_ws *sgug_ws_connect(sgug_tls_ctx *ctx, const char *url, const char *token,
  */
 int sgug_ws_send_text(sgug_ws *ws, const char *text, size_t len, int timeout_ms,
     char *err, size_t errlen);
-
-/*
- * Answers any pending ping and notices a close. Never blocks. Returns 0 while
- * the socket is usable, -1 once the peer has closed it.
- */
-int sgug_ws_pump(sgug_ws *ws);
 
 /* Sends a close frame, best effort. The reply is not awaited. */
 void sgug_ws_close(sgug_ws *ws);
@@ -71,14 +65,22 @@ void sgug_ws_free(sgug_ws *ws);
 size_t sgug_ws_frame_header(unsigned char *out, int opcode, int fin,
     uint64_t payload_len, const unsigned char mask[4]);
 
-/* XOR with the masking key. Self-inverse, so it also unmasks. */
-void sgug_ws_mask(unsigned char *buf, size_t len, const unsigned char mask[4],
-    size_t offset);
+/* XOR with the masking key. Self-inverse, so it also unmasks. Each frame is
+ * masked independently, so the key always restarts at the frame's first byte. */
+void sgug_ws_mask(unsigned char *buf, size_t len, const unsigned char mask[4]);
 
 /*
  * base64(SHA1(key + the RFC 6455 GUID)), the value a server must return in
- * Sec-WebSocket-Accept. out needs 30 bytes.
+ * Sec-WebSocket-Accept. Writes 28 characters, so out needs 29 bytes.
  */
 int sgug_ws_accept_key(const char *key, char *out, size_t outlen);
+
+/*
+ * Describes the fragment of a message starting at off: its length, whether it
+ * is the last, and which opcode carries it. Split out so the fragmentation can
+ * be tested without a socket.
+ */
+void sgug_ws_next_fragment(size_t len, size_t off, size_t *chunk, int *fin,
+    int *opcode);
 
 #endif /* SGUG_NET_WS_H */
