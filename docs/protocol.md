@@ -315,6 +315,21 @@ The same triple exists as `GetJobLogsSignedBlobURL` / `CreateJobLogsMetadata`,
 and for step summaries. **The whole-job log is a separate upload from the
 per-step logs**, not a concatenation the service derives.
 
+A log larger than one 2 MB block is streamed rather than sent whole, which is
+what keeps a long build from being held in memory:
+
+```
+first and only block   PUT <url>                     x-ms-blob-type: BlockBlob
+first of several       PUT <url>                     x-ms-blob-type: AppendBlob
+                                                     Content-Length: 0
+every block            PUT <url>&comp=appendblock    x-ms-blob-sealed: False
+last block             PUT <url>&comp=appendblock&seal=true
+                                                     x-ms-blob-sealed: True
+```
+
+A fresh signed URL is requested for every block; the blob it names is the same
+one each time. The metadata call is sent only after the final block.
+
 ### `POST .../WorkflowStepUpdateService/WorkflowStepsUpdate`
 
 Live step state. Without it the UI shows nothing until
@@ -394,20 +409,44 @@ matches. The listing is scoped to the run and reports which job owns each
 artifact. Take **both** ids from the listing and use them for
 `GetSignedArtifactURL`.
 
-### Live log tailing, not implemented
+### Live console output
 
-`FeedStreamUrl` is
-`wss://results-receiver.actions.githubusercontent.com/_ws/ingest.sock`. In
-run-service mode the official runner streams console output over that socket
-(`ResultServer.AppendLiveConsoleFeedAsync`) and carries a full RFC 6455 client
-for it.
+Two independent transports carry step output, and conflating them wastes a lot
+of time. The blob API above is the durable log. The live tail, what the UI
+updates while a step is still running, is a WebSocket.
 
-The blob path is the alternative: request `x-ms-blob-type: AppendBlob` instead
-of `BlockBlob`, append as the step produces output, then seal with
-`x-ms-blob-sealed`. That reuses the existing HTTP client instead of roughly 250
-lines of handshake and client-masked framing.
+`FeedStreamUrl` in the endpoint `data` is
+`wss://results-receiver.actions.githubusercontent.com/_ws/ingest.sock`. The
+runner opens it once per job and writes one JSON text message per batch.
 
-Neither is implemented. Step logs appear when each step finishes.
+```json
+{"count": 2, "value": ["first line", "second"],
+ "stepId": "<step id>", "startLine": 42}
+```
+
+camelCase, and `startLine` is the number of the batch's first line. Batches
+carry at most 100 lines for one step, pushed every 250 to 500 ms.
+
+| | |
+|---|---|
+| Headers | `Authorization: Bearer <job token>`, `User-Agent` |
+| Subprotocol | none. No `Sec-WebSocket-Protocol` |
+| Framing | split into 1024-byte fragments, `FIN` on the last only |
+| Direction | the client only sends. `ResultsServer.cs` has no receive call |
+| Keepalive | none configured, no application ping |
+| Close | `CloseOutputAsync`, normal closure, reply not awaited |
+| On failure | lines are dropped, the socket is abandoned, the job continues |
+
+The client never reading is worth relying on: nothing the server sends has to
+be parsed for correctness. Answering a ping is still worth doing, since an
+intermediary may otherwise treat the connection as dead.
+
+Two buffer sizes matter here and neither fails loudly. The job token is a JWT
+running to a couple of kilobytes, so an upgrade request assembled in a small
+buffer is silently truncated and the server just closes the connection. The
+same applies to the signed blob URL: it already carries a full SAS in its query
+string, and appending `&comp=appendblock` to a buffer that cannot hold it
+produces `AuthenticationFailed` from Azure rather than an obvious overflow.
 
 ## Job message reference
 

@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Live console output. Step output now appears in the UI while the step is
+  still running, over the WebSocket at `FeedStreamUrl`, which is what the
+  official runner uses. Best effort: a failed feed is abandoned and the
+  uploaded log remains authoritative.
+- Logs of any size. Output is streamed in 2 MB blocks to an append blob
+  instead of being held whole and sent at step end, so a long build no longer
+  grows the runner's memory in step with its own output.
+
+### Fixed
+
+- `docs/protocol.md` claimed the blob API was the live tailing route. It is
+  not; it is the durable log, and the live tail is a separate socket.
+
 ## [0.1.0] - 2026-07-27
 
 First release. An SGI running IRIX 6.5 registers as a self-hosted runner and
