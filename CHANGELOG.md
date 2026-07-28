@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `runner execjob --message FILE --name NAME --work DIR` runs a single job from
+  a message file, with no configured runner present. It reads no `.runner`,
+  `.credentials` or `.rsakey`: everything a job needs is already in the
+  message.
+- `--cancel-file PATH` on `execjob` stops a running job when that file's mtime
+  changes. `SIGINT` and `SIGTERM` now cancel the job rather than killing the
+  process, so it still reports a result.
+
+### Fixed
+
+- Connecting treated any `poll` return other than 1 as a failure, so a signal
+  arriving during `connect` failed the connection.
+
 ## [0.3.0] - 2026-07-28
 
 ### Added
