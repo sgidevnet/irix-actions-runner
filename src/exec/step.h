@@ -67,17 +67,6 @@ int sgug_step_run(const sgug_step *step, const sgug_step_opts *opts,
     sgug_step_output_fn on_line, void *ctx, char *err, size_t errlen);
 
 /*
- * Evaluates a step condition against the job state so far.
- *
- * Only the four forms the service actually emits for ordinary workflows are
- * understood: success(), always(), failure(), cancelled(). Anything else is
- * treated as success(), which is the permissive choice: running a step that
- * should have been skipped is visible in the log, whereas silently skipping
- * one the author expected to run is not.
- */
-int sgug_step_should_run(const char *condition, int job_failed, int job_cancelled);
-
-/*
  * Runs a program directly from an argv array, with no shell.
  *
  * Handlers use this rather than building a command line. A checkout puts an

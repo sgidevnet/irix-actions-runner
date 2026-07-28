@@ -8,6 +8,7 @@
 
 #include "exec/job.h"
 #include "exec/token.h"
+#include "expr/expr.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,46 +105,110 @@ test_token_forms(void)
 /*
  * The service compiles a `run:` body containing ${{ }} into a type 3
  * BasicExpression, and an interpolated one into a format() call over the
- * literal parts. Neither carries a `lit`, so reading it as a scalar yields the
- * fallback. That must not look like an absent key: an empty script is treated
- * as a no-op and the step is reported as having succeeded without running.
+ * literal parts. Neither carries a `lit`, so reading either as a scalar yields
+ * the fallback, which is indistinguishable from an absent key. That used to
+ * produce an empty script reported as having succeeded.
  */
 static void
-test_expression_script_is_rejected(void)
+test_expression_script_evaluates(void)
 {
-	static const char *WHOLE =
-	    "{\"type\":2,\"map\":[{\"Key\":{\"type\":0,\"lit\":\"script\"},"
-	    "\"Value\":{\"type\":3,\"expr\":\"github.sha\"}}]}";
-	static const char *INTERPOLATED =
-	    "{\"type\":2,\"map\":[{\"Key\":{\"type\":0,\"lit\":\"script\"},"
-	    "\"Value\":{\"type\":3,"
-	    "\"expr\":\"format('echo {0}', github.sha)\"}}]}";
-	static const char *LITERAL =
-	    "{\"type\":2,\"map\":[{\"Key\":{\"type\":0,\"lit\":\"script\"},"
-	    "\"Value\":{\"type\":0,\"lit\":\"echo hi\"}}]}";
-	sgug_json_doc *a = sgug_json_parse(WHOLE, strlen(WHOLE), NULL, 0);
-	sgug_json_doc *b = sgug_json_parse(INTERPOLATED, strlen(INTERPOLATED),
-	    NULL, 0);
-	sgug_json_doc *c = sgug_json_parse(LITERAL, strlen(LITERAL), NULL, 0);
+	static const char *CONTEXTS = "{\"github\":{\"sha\":\"deadbeef\"}}";
+	static const char *TOKENS[] = {
+		"{\"type\":3,\"expr\":\"github.sha\"}",
+		"{\"type\":3,\"expr\":\"format('echo {0}', github.sha)\"}",
+		"{\"type\":0,\"lit\":\"echo hi\"}"
+	};
+	static const char *WANT[] = { "deadbeef", "echo deadbeef", "echo hi" };
+	sgug_json_doc *cd = sgug_json_parse(CONTEXTS, strlen(CONTEXTS), NULL, 0);
+	sgug_expr_ctx *ctx;
+	size_t i;
 
-	CHECK(a != NULL && b != NULL && c != NULL);
-	if (a == NULL || b == NULL || c == NULL)
+	CHECK(cd != NULL);
+	if (cd == NULL)
 		return;
 
-	CHECK(!sgug_token_is_literal(
-	    sgug_token_map_get(sgug_json_root(a), "script")));
-	CHECK(!sgug_token_is_literal(
-	    sgug_token_map_get(sgug_json_root(b), "script")));
-	CHECK(sgug_token_is_literal(
-	    sgug_token_map_get(sgug_json_root(c), "script")));
+	ctx = sgug_expr_ctx_new_json(sgug_json_root(cd));
+	CHECK(ctx != NULL);
+	if (ctx == NULL) {
+		sgug_json_free(cd);
+		return;
+	}
 
-	/* An absent key is a third case, and is not an expression. */
-	CHECK(!sgug_token_is_literal(
-	    sgug_token_map_get(sgug_json_root(c), "absent")));
+	for (i = 0; i < sizeof(TOKENS) / sizeof(TOKENS[0]); i++) {
+		sgug_json_doc *t = sgug_json_parse(TOKENS[i],
+		    strlen(TOKENS[i]), NULL, 0);
+		char *got = NULL;
+		char err[256];
 
-	sgug_json_free(a);
-	sgug_json_free(b);
-	sgug_json_free(c);
+		CHECK(t != NULL);
+		if (t == NULL)
+			continue;
+		CHECK(sgug_expr_eval_token(ctx, sgug_json_root(t), &got, err,
+		    sizeof(err)) == 0);
+		CHECK_EQ_STR(got, WANT[i]);
+		free(got);
+		sgug_json_free(t);
+	}
+
+	sgug_expr_ctx_free(ctx);
+	sgug_json_free(cd);
+}
+
+/*
+ * The contexts as a job actually presents them. runner arrives null and is
+ * synthesised, secrets is the variables map filtered on isSecret rather than a
+ * context of its own, and job.check_run_id is a number nested inside the
+ * compact form, which the old one-level string lookup could not reach.
+ */
+static void
+test_contexts_from_message(void)
+{
+	static const struct {
+		const char *expr;
+		const char *want;
+	} CASES[] = {
+		{ "github.repository", "sgidevnet/irix-actions-runner" },
+		{ "github.event_name == 'PUSH'", "true" },
+		{ "job.check_run_id", "90005817181" },
+		{ "runner.workspace", "/w" },
+		{ "secrets.github_token", "SYNTHETIC-GITHUB-TOKEN" },
+		{ "secrets.NOT_A_SECRET", "" },
+		{ "toJSON(env)", "{}" },
+		{ "format('{0}@{1}', github.actor, github.run_number)",
+		  "mach-kernel@3" },
+		{ "contains(github.ref, 'main') && !cancelled()", "true" }
+	};
+	sgug_job job;
+	sgug_expr_ctx *ctx;
+	char err[256];
+	char *text;
+	size_t len, i;
+
+	text = slurp("test/fixtures/job-message.json", &len);
+	CHECK(text != NULL);
+	if (text == NULL)
+		return;
+
+	CHECK(sgug_job_parse(text, len, &job, err, sizeof(err)) == 0);
+	ctx = sgug_expr_ctx_new(&job, NULL, "/w", "/t");
+	CHECK(ctx != NULL);
+
+	for (i = 0; i < sizeof(CASES) / sizeof(CASES[0]); i++) {
+		char *got = NULL;
+
+		if (sgug_expr_eval_string(ctx, CASES[i].expr, &got, err,
+		    sizeof(err)) != 0) {
+			printf("FAIL %s: %s\n", CASES[i].expr, err);
+			failures++;
+			continue;
+		}
+		CHECK_EQ_STR(got, CASES[i].want);
+		free(got);
+	}
+
+	sgug_expr_ctx_free(ctx);
+	sgug_job_free(&job);
+	free(text);
 }
 
 static void
@@ -244,8 +309,9 @@ int
 main(void)
 {
 	test_token_forms();
-	test_expression_script_is_rejected();
+	test_expression_script_evaluates();
 	test_parse_fixture();
+	test_contexts_from_message();
 	test_rejects_incomplete();
 
 	if (failures != 0) {

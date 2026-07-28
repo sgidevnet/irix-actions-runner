@@ -69,37 +69,6 @@ capture_free(struct capture *c)
 }
 
 static void
-test_conditions(void)
-{
-	/* not failed, not cancelled */
-	CHECK(sgug_step_should_run("success()", 0, 0) == 1);
-	CHECK(sgug_step_should_run("always()", 0, 0) == 1);
-	CHECK(sgug_step_should_run("failure()", 0, 0) == 0);
-	CHECK(sgug_step_should_run("cancelled()", 0, 0) == 0);
-
-	/* after a failure */
-	CHECK(sgug_step_should_run("success()", 1, 0) == 0);
-	CHECK(sgug_step_should_run("always()", 1, 0) == 1);
-	CHECK(sgug_step_should_run("failure()", 1, 0) == 1);
-
-	/* cancelled beats everything except always() */
-	CHECK(sgug_step_should_run("success()", 0, 1) == 0);
-	CHECK(sgug_step_should_run("always()", 0, 1) == 1);
-	CHECK(sgug_step_should_run("cancelled()", 0, 1) == 1);
-	/* failure() must not fire on a cancellation; a cancelled job has not
-	 * failed, and cleanup steps guarded by failure() should not run. */
-	CHECK(sgug_step_should_run("failure()", 1, 1) == 0);
-
-	/* An expression we do not parse is treated as success(): running a step
-	 * that should have been skipped is visible in the log, silently
-	 * skipping one that should have run is not. */
-	CHECK(sgug_step_should_run("github.event_name == 'push'", 0, 0) == 1);
-	CHECK(sgug_step_should_run("github.event_name == 'push'", 1, 0) == 0);
-	CHECK(sgug_step_should_run(NULL, 0, 0) == 1);
-	CHECK(sgug_step_should_run("", 1, 0) == 0);
-}
-
-static void
 run(const char *script, struct capture *cap, int *status, const char *shell)
 {
 	sgug_step st;
@@ -375,7 +344,6 @@ test_script_file_removed(void)
 int
 main(void)
 {
-	test_conditions();
 	test_output_and_status();
 	test_multiline_and_quoting();
 	test_no_stdin();

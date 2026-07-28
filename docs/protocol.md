@@ -494,12 +494,44 @@ not as a boolean, so the service defers evaluation of both.
 
 A type 3 token carries no `lit`, so a reader that only understands literals
 returns its fallback, which is indistinguishable from an absent key. For a
-step's `script` that yielded an empty body, and an empty body was treated as a
-no-op and reported as succeeded. The runner now rejects the step instead. The
-contexts the message does carry are `github`, `inputs`, `job`, `matrix`,
-`needs`, `strategy` and `vars`, plus a top-level `environmentVariables` holding
-the workflow and job `env:` blocks; `runner` arrives null and is synthesised
-locally.
+step's `script` that yielded an empty body, which was treated as a no-op and
+reported as succeeded.
+
+`src/expr/` evaluates these. Evaluation happens immediately before the step
+runs, not at parse time, because `success()` and `failure()` depend on what has
+already run. `src/expr/grammar.y` is the grammar; no formal one is published
+anywhere, so it is written from the C# in `actions/runner`.
+
+### Where the contexts come from
+
+`contextData` carries `github`, `inputs`, `job`, `matrix`, `needs`, `strategy`
+and `vars`. The other three are not there and have to be assembled.
+
+`runner` arrives as `null` and is synthesised from the runner's own
+configuration.
+
+`env` is `environmentVariables`, a top-level array of mapping TemplateTokens
+holding the workflow scope then the job scope, in that order. A step's own
+`env:` is not in it: that is `steps[i].environment`, a mapping token on the
+step. Later scopes win.
+
+```json
+"environmentVariables": [
+  {"type": 2, "map": [{"Key": {"type": 0, "lit": "WORKFLOW_LEVEL"},
+                       "Value": {"type": 0, "lit": "wf"}}]}
+]
+```
+
+`secrets` is not a context at all. It is the `variables` map filtered on
+`isSecret`, and the service sends only the secrets the workflow text actually
+references:
+
+```json
+"variables": {
+  "MY_SECRET": {"value": "s3cr3t", "isSecret": true},
+  "system.github.token": {"value": "ghs_...", "isSecret": true}
+}
+```
 
 | Field | Value | Reference says |
 |---|---|---|

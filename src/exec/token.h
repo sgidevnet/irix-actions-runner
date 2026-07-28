@@ -26,21 +26,12 @@
 
 /*
  * String value of a scalar token. Handles the verbose `lit`, the compact `s`,
- * and a bare JSON string. Returns fallback for anything else, including a
- * number or a container.
+ * and a bare JSON string. Returns fallback for anything else: a number, a
+ * container, or the type 3 expression form, which is indistinguishable from an
+ * absent key here. Anything that can carry a `${{ }}` must go through
+ * sgug_expr_eval_token instead.
  */
 const char *sgug_token_str(const sgug_json *tok, const char *fallback);
-
-/*
- * Whether a scalar token carries a literal value that sgug_token_str can read.
- *
- * False for the expression form the service emits when the YAML contained
- * `${{ }}`: a whole scalar becomes an expression token, and an interpolated one
- * becomes a format() call over the literal parts. Callers must distinguish that
- * from an absent key, because the fallback for an expression is indistinguishable
- * from "not set" and silently produces an empty script.
- */
-int sgug_token_is_literal(const sgug_json *tok);
 
 /*
  * Value for a key inside a mapping token, matched case-insensitively.

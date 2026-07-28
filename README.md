@@ -107,8 +107,8 @@ Configuration is written beside the binary as `.runner`, `.credentials` and
 | Job cancellation and prompt shutdown | yes |
 | Resource limits on every step | yes |
 | `chroot` and uid drop | implemented, root only, untested |
-| `${{ }}` expressions | no |
-| `env:` blocks | no |
+| `${{ }}` in `run:`, `with:` and `if:` | yes |
+| `env:` blocks | readable as `${{ env.X }}`, not exported to the step |
 | JavaScript actions | no |
 | Container jobs, Docker actions, service containers | no |
 
@@ -117,19 +117,28 @@ silently.
 
 ## Writing workflows
 
-Most workflow YAML works unchanged. Four differences matter.
+Most workflow YAML works unchanged. `${{ }}` is evaluated in a `run:` body, a
+`with:` value and `if:`.
+
+| Expressions | Status |
+|---|---|
+| Operators, literals, precedence | yes |
+| `contains` `startsWith` `endsWith` `format` `join` `toJSON` `fromJSON` `case` | yes |
+| `success()` `always()` `failure()` `cancelled()` | yes |
+| `github` `job` `runner` `env` `secrets` `inputs` `matrix` `needs` `strategy` `vars` | yes |
+| `hashFiles()` | no, fails the step by name |
+| `steps` context | no, needs `$GITHUB_OUTPUT`; fails the step by name |
+| Case folding above ASCII | no, `'Ü' == 'ü'` is false where GitHub says true |
+
+Three things to write differently.
 
 | Instead of | Write |
 |---|---|
-| `${{ github.ref_name }}` in a `run:` body | `$GITHUB_REF_NAME`. The usual `$GITHUB_*` and `$RUNNER_*` variables are exported |
-| `${{ }}` in a `with:` value | A literal. An expression there reads as absent, so an artifact name built from run metadata silently becomes `artifact` |
-| `env:` blocks | Values written directly into the `run:` text |
-| `$GITHUB_OUTPUT`, `$GITHUB_ENV` | Nothing. Steps cannot pass values to each other, and no `GITHUB_TOKEN` reaches them |
+| `$NAME` from an `env:` block | The value in the `run:` text. `env:` is readable as `${{ env.NAME }}` but is not exported to the step's shell |
+| `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `::` commands | Nothing. Steps cannot pass values to each other, and no `GITHUB_TOKEN` reaches them |
+| `timeout-minutes:` on a step | Nothing. It is parsed and ignored; every step gets 3600 seconds. Job-level `timeout-minutes` is server-side and works |
 
-`${{ }}` in a `run:` body is rejected with an explicit error rather than
-running an empty script. Steps run under `-e`, and bash steps under
-`-o pipefail`, matching GitHub. `if:` understands `always()`, `failure()`,
-`cancelled()` and `success()`; anything more complex is treated as `success()`.
+Steps run under `-e`, and bash steps under `-o pipefail`, matching GitHub.
 
 JavaScript actions are not planned. V8 dropped its MIPS backends in 2023, and
 Node sits on libuv, which has no IRIX backend. Run JS steps on a hosted runner

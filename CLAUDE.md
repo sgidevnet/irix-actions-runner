@@ -73,21 +73,20 @@ neither compiler will catch you.
 What this runner does *not* implement. Read this before writing or editing any
 workflow YAML in `.github/workflows/`, because several of these fail silently.
 
-- **No expression evaluator.** `${{ }}` in a `run:` body arrives as a
-  TemplateToken type 3 and is now rejected with an explicit error. In a `with:`
-  value it still reads as absent, so `name: x-${{ github.sha }}` on
-  upload-artifact silently uploads an artifact called `artifact`. **Every
-  `with:` value must be a YAML literal.** Use `$GITHUB_*` shell variables in
-  `run:` bodies instead.
-- **`env:` blocks are discarded** at workflow, job and step level. Nothing can
-  be injected into a job. Bake values into the `run:` text.
+- **`${{ }}` works** in a `run:` body, a `with:` value and `if:`, evaluated by
+  `src/expr/`. Two things do not: `hashFiles()`, which the reference implements
+  by shelling out to Node, and the `steps` context, which needs
+  `$GITHUB_OUTPUT`. Both fail the step by name rather than reading as empty, so
+  `if: steps.build.outcome == 'success'` now fails where it used to run.
+  Unicode case folding is ASCII only, so `'Ü' == 'ü'` is false where the
+  reference says true.
+- **`env:` blocks are readable but not exported.** `${{ env.NAME }}` resolves
+  at workflow, job and step scope, but nothing puts an `env:` value into the
+  step's shell environment. Bake values into the `run:` text.
 - **No `GITHUB_TOKEN` in the step environment**, and no `GITHUB_ENV`,
   `GITHUB_OUTPUT`, `GITHUB_PATH` or `GITHUB_STEP_SUMMARY`. Steps cannot call
   the REST API or pass values to one another. `::` workflow commands are not
   parsed.
-- **`if:` is three `strstr` calls** (`src/exec/step.c`). Only bare `always()`,
-  `failure()`, `cancelled()` and `success()` behave. Anything else is treated
-  as `success()`, and `if: !cancelled()` is inverted.
 - **`timeout-minutes:` on a step is parsed and ignored.** Every step gets 3600
   seconds of wall clock, not configurable from YAML. Job-level
   `timeout-minutes` is server-side and does work. Split long work into separate
@@ -108,6 +107,7 @@ src/net/      tcp.c tls.c http.c    sockets, OpenSSL, HTTP/1.1
 src/crypto/   rsa.c jwt.c aes.c b64.c
 src/json/     vendored parser, case-insensitive key lookup
 src/proto/    oauth register listener report results mask config
+src/expr/     grammar.y lex eval ctx  the ${{ }} language
 src/exec/     token job step handlers runjob
 src/sandbox/  jail.c confine.c
 ```
