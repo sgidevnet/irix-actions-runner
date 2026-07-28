@@ -1,8 +1,19 @@
 UNAME_S := $(shell uname -s)
 
 BUILD   := build
+
+# src/serve/ is host-only. Excluded here rather than behind an #if, which would
+# leave MIPSPro an empty translation unit; ISO C forbids that.
+ifeq ($(UNAME_S),IRIX64)
+PLATFORM_SRCS :=
+else
+PLATFORM_SRCS := $(wildcard src/serve/*.c)
+endif
+
 # Everything except main.c, so each test binary can supply its own entry point.
-LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c src/crypto/*.c src/json/*.c src/proto/*.c src/exec/*.c src/expr/*.c src/sandbox/*.c)
+LIB_SRCS  := $(wildcard src/compat/*.c src/net/*.c src/crypto/*.c \
+	src/json/*.c src/proto/*.c src/exec/*.c src/expr/*.c \
+	src/sandbox/*.c) $(PLATFORM_SRCS)
 SRCS      := $(LIB_SRCS) src/main.c
 LIB_OBJS  := $(LIB_SRCS:%.c=$(BUILD)/%.o)
 OBJS      := $(SRCS:%.c=$(BUILD)/%.o)
