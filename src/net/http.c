@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define MAX_REDIRECTS 10
 #define MAX_HEADER_BYTES 65536
@@ -305,6 +306,12 @@ sgug_http_client_free(sgug_http_client *c)
 	free(c);
 }
 
+sgug_tls_ctx *
+sgug_http_tls_ctx(sgug_http_client *c)
+{
+	return c != NULL ? c->tls_ctx : NULL;
+}
+
 static int
 ensure_conn(sgug_http_client *c, const struct url *u, int timeout_ms)
 {
@@ -331,7 +338,10 @@ ensure_conn(sgug_http_client *c, const struct url *u, int timeout_ms)
 
 	c->conn = sgug_tls_connect(c->tls_ctx, fd, u->host);
 	if (c->conn == NULL) {
+		/* Ownership transfers only on success, and the SNI and hostname
+		 * failures happen before the descriptor is handed over at all. */
 		set_error("tls: %s", sgug_tls_last_error());
+		close(fd);
 		return -1;
 	}
 

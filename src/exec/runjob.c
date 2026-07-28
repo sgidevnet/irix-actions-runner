@@ -49,6 +49,16 @@ on_line(void *ctx, const char *line)
 	fflush(stdout);
 }
 
+/* Pushes buffered console lines while the step is still running. Best effort
+ * and bounded internally, so it is safe on the pipe-draining thread. */
+static void
+on_tick(void *ctx)
+{
+	struct runctx *rc = ctx;
+
+	sgug_report_flush(rc->rep);
+}
+
 static int
 should_abort(void *ctx)
 {
@@ -273,6 +283,8 @@ sgug_run_job(sgug_http_client *http, const sgug_config *cfg,
 
 		sopts.abort_cb = should_abort;
 		sopts.abort_ctx = &rc;
+		sopts.tick_cb = on_tick;
+		sopts.tick_ctx = &rc;
 		steperr[0] = '\0';
 
 		if (st->kind == SGUG_STEP_ACTION) {

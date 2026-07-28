@@ -32,20 +32,29 @@ sgug_results *sgug_results_new(sgug_http_client *http, const sgug_job *job);
 void sgug_results_free(sgug_results *r);
 
 /*
- * Uploads one step's complete log and registers it. line_count is what the UI
- * shows as the log length.
+ * Uploads one block of a step's log.
+ *
+ * A log that fits in a single block goes up as one blob: pass first_block and
+ * finalize together. Anything longer is streamed, so the runner never has to
+ * hold a whole build's output in memory. The first block creates an append
+ * blob, later ones extend it, and the last seals it. line_count is the running
+ * total and is only read on the final block, which is also the only one that
+ * registers the log with the service.
  */
 int sgug_results_step_log(sgug_results *r, const char *step_id,
-    const char *log, size_t len, int64_t line_count, char *err, size_t errlen);
+    const char *log, size_t len, int64_t line_count, int first_block,
+    int finalize, char *err, size_t errlen);
 
 /*
- * Uploads the whole-job log. Separate from the per-step logs and not derived
- * from them: the steps drive what each section shows when expanded, while this
- * is what the download-log button and the REST logs endpoint serve. Without it
- * that endpoint answers BlobNotFound even though the steps look complete.
+ * Uploads a block of the whole-job log. Separate from the per-step logs and not
+ * derived from them: the steps drive what each section shows when expanded,
+ * while this is what the download-log button and the REST logs endpoint serve.
+ * Without it that endpoint answers BlobNotFound even though the steps look
+ * complete. Blocking works as for a step log.
  */
 int sgug_results_job_log(sgug_results *r, const char *log, size_t len,
-    int64_t line_count, char *err, size_t errlen);
+    int64_t line_count, int first_block, int finalize, char *err,
+    size_t errlen);
 
 /* Live step state, mirroring what the UI shows while a job runs. */
 typedef enum {

@@ -73,6 +73,7 @@ typedef struct {
 	const char *access_token;
 	const char *pipelines_url;	/* legacy timeline and log APIs */
 	const char *results_url;	/* Twirp results service */
+	const char *feed_stream_url;	/* wss:// live console feed */
 	const char *billing_owner_id;
 
 	/*
