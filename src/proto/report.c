@@ -50,9 +50,8 @@ struct step_state {
 	/* Pending console lines, flushed periodically. */
 	char *feed[MAX_FEED_LINES];
 	size_t nfeed;
-	/* Absolute 1-based log line number of feed[0]. Reset from log_lines
-	 * whenever the buffer empties, so lines dropped while it was full do not
-	 * shift later batches on top of output the UI has already drawn. */
+	/* Absolute 1-based line number of feed[0], reset from log_lines when the
+	 * buffer empties so dropped lines cannot shift later batches. */
 	int64_t feed_base;
 };
 

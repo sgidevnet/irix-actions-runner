@@ -1,0 +1,44 @@
+name: ci
+
+# Merge gate. Covers everything except the compat layer and anything IRIX
+# specific, which still needs the hardware.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          if [ ! -f /usr/include/openssl/ssl.h ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends libssl-dev
+          fi
+          cc --version | sed -n 1p
+          openssl version
+
+      - name: Build
+        run: make
+
+      # The %z grep. The MIPSPro half skips itself off IRIX.
+      - name: Portability gate
+        run: make check
+
+      - name: Unit tests
+        run: make test

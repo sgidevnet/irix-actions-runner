@@ -269,12 +269,9 @@ field(const sgug_json *o, const char *snake, const char *camel)
 }
 
 /*
- * PUTs one block to a signed blob URL.
- *
- * A whole log in one block is a plain BlockBlob. Otherwise it is an append
- * blob: the first block creates it empty, every block extends it, and the last
- * seals it so the service knows nothing more is coming. The signed URL already
- * carries a query string, hence the & rather than ?.
+ * One block to a signed blob URL. A whole log in one block is a BlockBlob;
+ * otherwise the first creates an append blob, each extends it, the last seals
+ * it. The URL already has a query string, hence & not ?.
  */
 static int
 put_block(sgug_results *r, const char *url, const char *data, size_t len,

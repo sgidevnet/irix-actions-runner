@@ -47,10 +47,8 @@ sgug_ws_frame_header(unsigned char *out, int opcode, int fin,
 
 	out[n++] = (unsigned char)((fin ? 0x80 : 0x00) | (opcode & 0x0f));
 
-	/*
-	 * The length is encoded in the shortest of three forms, and a server is
-	 * entitled to reject a longer one carrying a small value.
-	 */
+	/* Shortest of the three forms: a longer one carrying a small value is
+	 * legal to reject. */
 	if (payload_len < 126) {
 		out[n++] = (unsigned char)(0x80 | payload_len);
 	} else if (payload_len <= 0xffff) {
@@ -346,14 +344,9 @@ sgug_ws_connect(sgug_tls_ctx *ctx, const char *url, const char *token,
 }
 
 /*
- * Waits for the socket to accept a write.
- *
- * IRIX rejects SO_SNDTIMEO, so the descriptor is fully blocking and a peer that
- * stops reading would otherwise stall SSL_write indefinitely. This runs on the
- * thread draining the child's pipe, so that stalls the step itself: a feed that
- * exists to be a convenience must never be able to wedge a job. Bounding the
- * wait does not make a mid-write stall impossible, only unlikely, since a frame
- * is at most SGUG_WS_FRAGMENT plus a header.
+ * IRIX rejects SO_SNDTIMEO, so the socket is blocking and a peer that stops
+ * reading would stall the thread draining the child's pipe, wedging the step.
+ * Bounds the common case; a stall mid-frame is still possible.
  */
 static int
 wait_writable(sgug_ws *ws, int timeout_ms)
