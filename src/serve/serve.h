@@ -41,9 +41,7 @@ typedef int (*sgug_listen_dir)(const char *dir, int verbose,
 #else
 
 /*
- * Forks one child per configured identity, each running fn() against its own
- * directory with the container executor installed. Returns once every child
- * has exited.
+ * Forks one child per configured identity, returning when all have exited.
  *
  * The fork comes before anything touches the network: sgug_http_client caches
  * one keep-alive TLS connection per host and port, and children sharing it

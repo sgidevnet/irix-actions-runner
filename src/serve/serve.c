@@ -101,12 +101,13 @@ sgug_serve(const sgug_serve_opts *opts, sgug_listen_dir fn)
 	sigprocmask(SIG_UNBLOCK, &block, NULL);
 	fflush(stdout);
 
-	/* A child deletes its pool session on the way out; a parent that exits
-	 * first leaves N orphans, each a minute of 409 retries next start. */
 	/* Zero, not now: a serve killed by docker stop before its own grace
 	 * elapsed leaves containers and their job tokens behind, and this is
 	 * the only thing that collects them. */
 	reaped = 0;
+
+	/* A child deletes its pool session on the way out; a parent that exits
+	 * first leaves N orphans, each a minute of 409 retries next start. */
 	for (live = nkids; live > 0; ) {
 		pid_t pid;
 		int st;
@@ -142,10 +143,10 @@ sgug_serve(const sgug_serve_opts *opts, sgug_listen_dir fn)
 			continue;
 		}
 
-		if (sgug_monotonic_ms() - reaped >=
+		if (sgug_container_monotonic_ms() - reaped >=
 		    (int64_t)REAP_INTERVAL_SECS * 1000) {
 			sgug_container_reap();
-			reaped = sgug_monotonic_ms();
+			reaped = sgug_container_monotonic_ms();
 		}
 		sleep(1);
 	}

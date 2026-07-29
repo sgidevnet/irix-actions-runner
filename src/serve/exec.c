@@ -38,14 +38,14 @@
  * read, and JobCancellation cannot reach a wedged emulator. */
 #define DEFAULT_DEADLINE_SECS 14400
 
-/* A staging directory path plus one of the names the contract puts under it. */
 /* A kill that keeps failing while inspect keeps answering would otherwise
  * hold the identity at currentParallelism 1 forever. */
 #define KILL_MAX_TRIES 5
 
+/* A staging directory path plus one of the names the contract puts under it. */
 #define STAGING_PATH_MAX 600
 
-/* One pass reaps this many; the next runs 30 seconds later. */
+/* One pass reaps this many; the next runs REAP_INTERVAL_SECS later. */
 #define REAP_MAX 64
 
 #define LABEL_SUPERVISOR "sgug.runner.supervisor"
@@ -63,12 +63,16 @@ sgug_container_config(const char *image, int secs)
 		deadline_secs = secs;
 }
 
-static void
+static int
 remove_container(const char *cid)
 {
 	char err[256];
 
-	sgug_docker_remove(cid, err, sizeof(err));
+	if (sgug_docker_remove(cid, err, sizeof(err)) != 0) {
+		fprintf(stderr, "remove %.12s: %s\n", cid, err);
+		return -1;
+	}
+	return 0;
 }
 
 static void
@@ -181,10 +185,8 @@ touch_cancel(const char *staging)
 	utimes(path, NULL);
 }
 
-/* Not sgug_monotonic_ms: that is gettimeofday, and a deadline of hours is long
- * enough for an NTP step to retire the job early or never. */
-static int64_t
-monotonic_ms(void)
+int64_t
+sgug_container_monotonic_ms(void)
 {
 	struct timespec ts;
 
@@ -196,7 +198,7 @@ static int
 supervise(const char *cid, const char *staging, volatile sig_atomic_t *stop,
     int *cancelled, int *timed_out)
 {
-	int64_t started = monotonic_ms();
+	int64_t started = sgug_container_monotonic_ms();
 	int64_t cancelled_at = 0;
 	char err[256];
 	int killed = 0, misses = 0, kill_fails = 0;
@@ -222,7 +224,7 @@ supervise(const char *cid, const char *staging, volatile sig_atomic_t *stop,
 		if (!running)
 			return code;
 
-		now = monotonic_ms();
+		now = sgug_container_monotonic_ms();
 		if (stop != NULL && *stop && !*cancelled) {
 			*cancelled = 1;
 			cancelled_at = now;
@@ -305,38 +307,54 @@ sgug_container_run_job(sgug_http_client *http, const sgug_config *cfg,
 	sgug_job job;
 	char staging[512];
 	char cid[80];
-	int cancelled = 0, timed_out = 0;
-	int status, rc = -1;
+	char ferr[256];
+	int cancelled = 0, timed_out = 0, completed = 0;
+	int status, ran = 0, rc = -1;
 
 	if (sgug_job_parse(message, message_len, &job, err, errlen) != 0)
 		return -1;
 
 	if (make_staging(staging, sizeof(staging), message, message_len, err,
 	    errlen) != 0)
-		goto out_job;
+		goto out;
 
 	if (start_container(cfg, staging, cid, sizeof(cid), err, errlen) != 0)
-		goto out_staging;
+		goto out;
 
 	printf("job       %s in %.12s\n", job.job_display_name, cid);
 	fflush(stdout);
 
 	status = supervise(cid, staging, stop, &cancelled, &timed_out);
+	ran = 1;
 	rc = 0;
-
-	if (!guest_completed(staging)) {
+	completed = guest_completed(staging);
+	if (!completed)
 		fprintf(stderr, "container %.12s exited %d%s without a "
 		    "completion; reporting the job from here\n", cid, status,
 		    timed_out ? " on the deadline" : "");
-		rc = fallback_complete(&job,
-		    cancelled ? SGUG_RESULT_CANCELED : SGUG_RESULT_FAILED,
-		    err, errlen);
+
+	/*
+	 * Every path past the parse unwinds through here: the slot was taken
+	 * at acquire, so a daemon that is down or an image that is missing has
+	 * to be reported from here just as a dead container does.
+	 */
+out:
+	if (!completed && fallback_complete(&job,
+	    cancelled ? SGUG_RESULT_CANCELED : SGUG_RESULT_FAILED,
+	    ferr, sizeof(ferr)) != 0) {
+		/* err already names the failure that got us here. */
+		if (rc == 0)
+			sgug_snprintf(err, errlen, "%s", ferr);
+		else
+			fprintf(stderr, "%s\n", ferr);
+		rc = -1;
 	}
 
-	remove_container(cid);
-out_staging:
-	remove_staging(staging);
-out_job:
+	/* A container whose removal failed still has the staging directory
+	 * bind mounted, so leave the pair for the reaper. */
+	if (!ran || remove_container(cid) == 0)
+		remove_staging(staging);
+
 	sgug_job_free(&job);
 	return rc;
 }
@@ -347,9 +365,11 @@ sgug_container_reap(void)
 	sgug_docker_container list[REAP_MAX];
 	char err[256];
 	size_t n, i;
+	int truncated;
 
+	/* truncated goes unread: the next pass takes what this one left. */
 	if (sgug_docker_list(LABEL_SUPERVISOR, LABEL_STAGING, list, REAP_MAX,
-	    &n, err, sizeof(err)) != 0)
+	    &n, &truncated, err, sizeof(err)) != 0)
 		return;
 
 	for (i = 0; i < n; i++) {
@@ -362,8 +382,8 @@ sgug_container_reap(void)
 
 		fprintf(stderr, "reaping %.12s, supervisor %s is gone\n",
 		    list[i].id, list[i].supervisor);
-		remove_container(list[i].id);
-		if (list[i].staging[0] == '/')
+		if (remove_container(list[i].id) == 0 &&
+		    list[i].staging[0] == '/')
 			remove_staging(list[i].staging);
 	}
 }

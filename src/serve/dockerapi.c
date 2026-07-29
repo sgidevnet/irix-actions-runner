@@ -1,7 +1,7 @@
 /*
- * Docker Engine API over the unix socket. One connection per request: the
- * daemon honours Connection: close, so a response is read to EOF and decoded
- * in memory rather than incrementally.
+ * Docker Engine API over the unix socket. The daemon honours Connection:
+ * close, so each request gets its own connection and the reply is read to EOF
+ * and decoded in memory.
  */
 
 #include "serve/dockerapi.h"
@@ -10,6 +10,7 @@
 #include "json/json.h"
 
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 
 #include <ctype.h>
@@ -23,6 +24,7 @@
 
 #define DEFAULT_SOCKET "/var/run/docker.sock"
 #define MAX_RESP (1024 * 1024)
+#define IO_TIMEOUT 60
 
 struct buf {
 	char *p;
@@ -62,6 +64,7 @@ static int
 docker_connect(char *err, size_t errlen)
 {
 	struct sockaddr_un sa;
+	struct timeval tv;
 	const char *host = getenv("DOCKER_HOST");
 	const char *path = DEFAULT_SOCKET;
 	int fd;
@@ -88,11 +91,29 @@ docker_connect(char *err, size_t errlen)
 		sgug_snprintf(err, errlen, "socket: %s", strerror(errno));
 		return -1;
 	}
-	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-		sgug_snprintf(err, errlen, "connect %s: %s", path,
-		    strerror(errno));
+
+	/* An image pull streams progress the whole time it runs, so a minute
+	 * of silence is a wedged daemon rather than slow work. */
+	tv.tv_sec = IO_TIMEOUT;
+	tv.tv_usec = 0;
+	if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0 ||
+	    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
+		sgug_snprintf(err, errlen, "setsockopt: %s", strerror(errno));
 		close(fd);
 		return -1;
+	}
+
+	while (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+		/* A retry after EINTR reports the completed connect as
+		 * EISCONN, per POSIX connect(3). */
+		if (errno == EISCONN)
+			break;
+		if (errno != EINTR) {
+			sgug_snprintf(err, errlen, "connect %s: %s", path,
+			    strerror(errno));
+			close(fd);
+			return -1;
+		}
 	}
 	return fd;
 }
@@ -116,7 +137,6 @@ write_all(int fd, const void *data, size_t len)
 	return 0;
 }
 
-/* Value of a header within a NUL terminated header block, or NULL. */
 static const char *
 header_value(const char *head, const char *name)
 {
@@ -139,16 +159,43 @@ decode_chunked(const char *p, const char *end, struct buf *out, char *err,
 {
 	for (;;) {
 		const char *nl = memmem(p, (size_t)(end - p), "\r\n", 2);
-		unsigned long size;
+		size_t size = 0;
+		int ndigit = 0;
 
 		if (nl == NULL) {
 			sgug_snprintf(err, errlen, "truncated chunk header");
 			return -1;
 		}
-		size = strtoul(p, NULL, 16);
+		/*
+		 * strtoul takes a sign and reads a malformed line as the
+		 * terminating chunk, and both get past the bounds check
+		 * below. Capping inside the loop keeps size from wrapping.
+		 */
+		while (p < nl && isxdigit((unsigned char)*p)) {
+			int c = (unsigned char)*p++;
+
+			size = size * 16 + (size_t)(c <= '9' ? c - '0' :
+			    (c | 0x20) - 'a' + 10);
+			if (size > MAX_RESP) {
+				sgug_snprintf(err, errlen, "chunk size "
+				    "exceeds %lu bytes",
+				    (unsigned long)MAX_RESP);
+				return -1;
+			}
+			ndigit++;
+		}
+		if (ndigit == 0 || (p < nl && *p != ';')) {
+			sgug_snprintf(err, errlen, "bad chunk size");
+			return -1;
+		}
 		p = nl + 2;
 		if (size == 0)
 			return 0;
+		if (out->len + size > MAX_RESP) {
+			sgug_snprintf(err, errlen, "chunked body exceeds %lu "
+			    "bytes", (unsigned long)MAX_RESP);
+			return -1;
+		}
 		if ((size_t)(end - p) < size + 2) {
 			sgug_snprintf(err, errlen, "truncated chunk body");
 			return -1;
@@ -244,6 +291,11 @@ request(const char *method, const char *path, const char *body, int *status,
 
 		if (n < 0 && errno == EINTR)
 			continue;
+		if (n < 0 && errno == EAGAIN) {
+			sgug_snprintf(err, errlen, "read timed out after %d "
+			    "seconds", IO_TIMEOUT);
+			goto out;
+		}
 		if (n < 0) {
 			sgug_snprintf(err, errlen, "read: %s", strerror(errno));
 			goto out;
@@ -310,6 +362,58 @@ urlencode(const char *s, char *out, size_t outlen)
 	return 0;
 }
 
+/*
+ * A registry or authentication failure arrives inside the reply under HTTP
+ * 200, so the retried create is what reports it. Buffering the reply is cheap:
+ * 3.4 KB for a four layer, 130 MB image.
+ */
+static int
+pull_image(const char *image, char *err, size_t errlen)
+{
+	struct buf resp;
+	char name[160], tag[80], ename[480], etag[240], path[768];
+	const char *sep = strrchr(image, '@');
+	size_t namelen;
+	int status, rc = -1;
+
+	if (sep == NULL) {
+		const char *slash = strrchr(image, '/');
+
+		sep = strrchr(image, ':');
+		/* A colon before the last slash is a registry port. */
+		if (sep != NULL && slash != NULL && sep < slash)
+			sep = NULL;
+	}
+	namelen = sep != NULL ? (size_t)(sep - image) : strlen(image);
+	if (namelen >= sizeof(name) ||
+	    (sep != NULL && strlen(sep + 1) >= sizeof(tag))) {
+		sgug_snprintf(err, errlen, "image %s is too long", image);
+		return -1;
+	}
+	memcpy(name, image, namelen);
+	name[namelen] = '\0';
+	sgug_snprintf(tag, sizeof(tag), "%s",
+	    sep != NULL ? sep + 1 : "latest");
+
+	if (urlencode(name, ename, sizeof(ename)) != 0 ||
+	    urlencode(tag, etag, sizeof(etag)) != 0) {
+		sgug_snprintf(err, errlen, "image %s is too long", image);
+		return -1;
+	}
+	sgug_snprintf(path, sizeof(path), "/images/create?fromImage=%s&tag=%s",
+	    ename, etag);
+
+	memset(&resp, 0, sizeof(resp));
+	if (request("POST", path, NULL, &status, &resp, err, errlen) == 0) {
+		if (status == 200)
+			rc = 0;
+		else
+			fail_status("pull", status, &resp, err, errlen);
+	}
+	free(resp.p);
+	return rc;
+}
+
 int
 sgug_docker_run(const char *image, const char *bind, const char *const *env,
     size_t nenv, const sgug_docker_label *labels, size_t nlabel, char *id,
@@ -360,6 +464,16 @@ sgug_docker_run(const char *image, const char *bind, const char *const *env,
 	if (request("POST", "/containers/create", json, &status, &resp, err,
 	    errlen) != 0)
 		goto out;
+	/* create never pulls, and a missing image is the only 404 it answers. */
+	if (status == 404) {
+		free(resp.p);
+		memset(&resp, 0, sizeof(resp));
+		if (pull_image(image, err, errlen) != 0)
+			goto out;
+		if (request("POST", "/containers/create", json, &status,
+		    &resp, err, errlen) != 0)
+			goto out;
+	}
 	if (status != 201) {
 		fail_status("create", status, &resp, err, errlen);
 		goto out;
@@ -403,7 +517,7 @@ sgug_docker_inspect(const char *id, int *running, int *code, char *err,
 	sgug_json_doc *doc = NULL;
 	struct buf resp;
 	char path[128];
-	const sgug_json *state;
+	const sgug_json *state, *run, *exitc;
 	int status, rc = -1;
 
 	memset(&resp, 0, sizeof(resp));
@@ -421,12 +535,18 @@ sgug_docker_inspect(const char *id, int *running, int *code, char *err,
 		goto out;
 
 	state = sgug_json_get(sgug_json_root(doc), "State");
-	if (state == NULL) {
-		sgug_snprintf(err, errlen, "inspect: no State");
+	run = sgug_json_get(state, "Running");
+	exitc = sgug_json_get(state, "ExitCode");
+	/* Defaulting these reads a live container as exited 0, which force
+	 * removes it mid job and reports the job FAILED. */
+	if (sgug_json_type_of(run) != SGUG_JSON_BOOL ||
+	    sgug_json_type_of(exitc) != SGUG_JSON_NUMBER) {
+		sgug_snprintf(err, errlen,
+		    "inspect: no usable State.Running or State.ExitCode");
 		goto out;
 	}
-	*running = sgug_json_bool(sgug_json_get(state, "Running"), 0);
-	*code = (int)sgug_json_int(sgug_json_get(state, "ExitCode"), 0);
+	*running = sgug_json_bool(run, 0);
+	*code = (int)sgug_json_int(exitc, 0);
 	rc = 0;
 out:
 	sgug_json_free(doc);
@@ -476,8 +596,8 @@ sgug_docker_remove(const char *id, char *err, size_t errlen)
 
 int
 sgug_docker_list(const char *sup_key, const char *stage_key,
-    sgug_docker_container *out, size_t max, size_t *n, char *err,
-    size_t errlen)
+    sgug_docker_container *out, size_t max, size_t *n, int *truncated,
+    char *err, size_t errlen)
 {
 	sgug_jsonw *w = sgug_jsonw_new();
 	sgug_json_doc *doc = NULL;
@@ -489,6 +609,7 @@ sgug_docker_list(const char *sup_key, const char *stage_key,
 	int status, rc = -1;
 
 	*n = 0;
+	*truncated = 0;
 	memset(&resp, 0, sizeof(resp));
 	if (w == NULL)
 		return oom(err, errlen);
@@ -525,8 +646,10 @@ sgug_docker_list(const char *sup_key, const char *stage_key,
 
 	arr = sgug_json_root(doc);
 	count = sgug_json_len(arr);
-	if (count > max)
+	if (count > max) {
 		count = max;
+		*truncated = 1;
+	}
 
 	for (i = 0; i < count; i++) {
 		const sgug_json *c = sgug_json_at(arr, i);
