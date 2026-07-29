@@ -1,0 +1,21 @@
+headless   = true
+no_audio   = true
+ci         = true
+ci_socket  = "/tmp/iris.sock"
+banks      = [128, 128, 0, 0]
+nvram      = "/opt/iris/nvram.bin"
+serial_log = "/tmp/console.log"
+
+[nfs]
+shared_dir = "/job"
+
+[machine]
+profile = "indy_ip24"
+
+[jit]
+enabled = true
+
+[scsi.1]
+path    = "/opt/iris/indy.chd"
+cdrom   = false
+overlay = true
