@@ -6,6 +6,7 @@
 #include "proto/listener.h"
 #include "proto/oauth.h"
 #include "proto/register.h"
+#include "serve/serve.h"
 #include "version.h"
 
 #include <sys/stat.h>
@@ -30,9 +31,23 @@ usage(FILE *to, int rc)
 	      "      --labels A,B,C     extra labels beyond irix,mips,mips-n32\n"
 	      "      --work DIR         work folder, default _work\n"
 	      "      --replace          take over an existing runner of this name\n"
+	      "      --count N          register N identities, not one; adds\n"
+	      "                         an `emulated` label, excludes --name\n"
+	      "                         and --work\n"
+	      "      --name-prefix P    with --count: P-0, P-1, ... name\n"
+	      "                         both the directory and the runner\n"
 	      "\n"
-	      "  run [--verbose|--trace]\n"
+	      "  run [--dir DIR] [--verbose|--trace]\n"
 	      "      listen for jobs; this is what makes the runner show Online\n"
+	      "      --dir DIR          runner directory, default .\n"
+	      "\n"
+	      "  serve [--count N --name-prefix P] [--verbose|--trace]\n"
+	      "      one listener per identity, each job in its own container\n"
+	      "      Linux only; on IRIX use `run`\n"
+	      "      --count N          serve N identities, not one\n"
+	      "      --name-prefix P    directories P-0, P-1, ...\n"
+	      "      --image NAME       worker image, irix-worker:latest\n"
+	      "      --job-timeout SECS wall clock per job, default 14400\n"
 	      "\n"
 	      "  execjob --message FILE --name NAME --work DIR [options]\n"
 	      "      run one job from a message file; needs no configuration\n"
@@ -41,8 +56,9 @@ usage(FILE *to, int rc)
 	      "      --work DIR         work folder, must be absolute\n"
 	      "      --cancel-file PATH abort when this file's mtime changes\n"
 	      "\n"
-	      "  remove --token TOKEN   deregister and delete local configuration\n"
-	      "  status                 show the configured runner\n"
+	      "  remove --token TOKEN [--count N --name-prefix P]\n"
+	      "      deregister and delete local configuration\n"
+	      "  status [--dir DIR]     show the configured runner\n"
 	      "  selftest [host]        check TLS, certificates, HTTP and clock\n"
 	      "  version                print the version of this runner\n"
 	      "  help                   print this message\n",
@@ -59,6 +75,33 @@ arg_after(int argc, char **argv, int *i, const char *what)
 	}
 	(*i)++;
 	return argv[*i];
+}
+
+static int
+num_after(int argc, char **argv, int *i, const char *what, long max)
+{
+	const char *v = arg_after(argc, argv, i, what);
+	char *end;
+	long n;
+
+	n = strtol(v, &end, 10);
+	if (*v == '\0' || *end != '\0' || n < 1 || n > max) {
+		fprintf(stderr, "%s must be a number from 1 to %ld\n", what,
+		    max);
+		exit(2);
+	}
+	return (int)n;
+}
+
+/* A truncated "-N" suffix would give two identities one directory, and the
+ * second registration would replace the first. 16 covers "-63/_work". */
+static void
+check_prefix(const char *prefix)
+{
+	if (prefix == NULL || strlen(prefix) + 16 <= SGUG_MAX_NAME)
+		return;
+	fprintf(stderr, "--name-prefix is too long\n");
+	exit(2);
 }
 
 /* Splits "a,b,c" in place. Returns the count. */
@@ -88,10 +131,15 @@ cmd_configure(int argc, char **argv)
 	sgug_config cfg;
 	sgug_http_client *http;
 	char hostname[128];
+	char dir[SGUG_MAX_NAME];
+	char work[SGUG_MAX_NAME];
+	char cwd[SGUG_MAX_NAME];
 	char err[512];
 	const char *labels[32];
+	const char *prefix = NULL;
 	size_t nlabels = 0;
-	int i, rc;
+	int count = 0, work_set = 0;
+	int i, n;
 
 	memset(&opts, 0, sizeof(opts));
 	opts.work_folder = "_work";
@@ -111,10 +159,16 @@ cmd_configure(int argc, char **argv)
 			opts.runner_name = arg_after(argc, argv, &i, "--name");
 		else if (strcmp(argv[i], "--runnergroup") == 0)
 			opts.runner_group = arg_after(argc, argv, &i, "--runnergroup");
-		else if (strcmp(argv[i], "--work") == 0)
+		else if (strcmp(argv[i], "--work") == 0) {
 			opts.work_folder = arg_after(argc, argv, &i, "--work");
-		else if (strcmp(argv[i], "--replace") == 0)
+			work_set = 1;
+		} else if (strcmp(argv[i], "--replace") == 0)
 			opts.replace = 1;
+		else if (strcmp(argv[i], "--count") == 0)
+			count = num_after(argc, argv, &i, "--count",
+			    SGUG_MAX_IDENTITIES);
+		else if (strcmp(argv[i], "--name-prefix") == 0)
+			prefix = arg_after(argc, argv, &i, "--name-prefix");
 		else if (strcmp(argv[i], "--labels") == 0) {
 			char *v = (char *)arg_after(argc, argv, &i, "--labels");
 
@@ -131,19 +185,46 @@ cmd_configure(int argc, char **argv)
 		return 2;
 	}
 
-	if (opts.runner_name == NULL) {
+	if (count > 0 && work_set) {
+		fprintf(stderr, "--work cannot be combined with --count; each "
+		    "identity gets its own work folder\n");
+		return 2;
+	}
+
+	if ((count > 0) != (prefix != NULL)) {
+		fprintf(stderr, "--count and --name-prefix go together\n");
+		return 2;
+	}
+
+	if (count > 0 && opts.runner_name != NULL) {
+		fprintf(stderr, "--name and --count are exclusive; each "
+		    "identity is named after --name-prefix\n");
+		return 2;
+	}
+
+	check_prefix(prefix);
+
+	if (count == 0 && opts.runner_name == NULL) {
 		if (gethostname(hostname, sizeof(hostname)) != 0)
 			sgug_snprintf(hostname, sizeof(hostname), "irix-runner");
 		hostname[sizeof(hostname) - 1] = '\0';
 		opts.runner_name = hostname;
 	}
 
+	if (count > 0) {
+		if (nlabels == sizeof(labels) / sizeof(labels[0])) {
+			fprintf(stderr, "too many labels\n");
+			return 2;
+		}
+		labels[nlabels++] = "emulated";
+	}
+
 	opts.labels = labels;
 	opts.nlabels = nlabels;
 
-	if (sgug_config_exists(".") && !opts.replace) {
-		fprintf(stderr, "this directory already holds a configured "
-		    "runner; remove it first or pass --replace\n");
+	if (count > 0 && getcwd(cwd, sizeof(cwd)) == NULL) {
+		fprintf(stderr, "cannot resolve the current directory: %s\n",
+		    strerror(errno));
 		return 1;
 	}
 
@@ -153,20 +234,79 @@ cmd_configure(int argc, char **argv)
 		return 1;
 	}
 
-	err[0] = '\0';
-	rc = sgug_register(http, &opts, ".", &cfg, err, sizeof(err));
-	if (rc != 0) {
-		fprintf(stderr, "registration failed: %s\n", err);
-		sgug_http_client_free(http);
-		return 1;
+	for (n = 0; n < (count > 0 ? count : 1); n++) {
+		const char *d = ".";
+
+		if (count > 0) {
+			sgug_snprintf(dir, sizeof(dir), "%s-%d", prefix, n);
+			d = dir;
+			opts.runner_name = dir;
+			if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+				fprintf(stderr, "%s: %s\n", dir,
+				    strerror(errno));
+				sgug_http_client_free(http);
+				return 1;
+			}
+			/*
+			 * Absolute, and one each: runjob keys the workspace on
+			 * the repo name alone, so identities sharing a work
+			 * folder would share a checkout, and a relative one
+			 * would follow the cwd of `runner run` instead of the
+			 * identity.
+			 */
+			if (sgug_snprintf(work, sizeof(work), "%s/%s/_work",
+			    cwd, dir) != (int)(strlen(cwd) + strlen(dir) + 7)) {
+				fprintf(stderr, "%s: work folder path is too "
+				    "long\n", dir);
+				sgug_http_client_free(http);
+				return 1;
+			}
+			opts.work_folder = work;
+		}
+
+		if (sgug_config_exists(d) && !opts.replace) {
+			fprintf(stderr, "%s already holds a configured runner; "
+			    "remove it first or pass --replace\n", d);
+			sgug_http_client_free(http);
+			return 1;
+		}
+
+		/* Stops at the first failure, unlike cmd_remove. Recover by
+		 * removing the identities that did register: --replace would
+		 * rotate the RSA key of every one, and a listener already
+		 * running against an old key cannot unwrap its session. */
+		err[0] = '\0';
+		if (sgug_register(http, &opts, d, &cfg, err,
+		    sizeof(err)) != 0) {
+			fprintf(stderr, "registration failed in %s: %s\n", d,
+			    err);
+			sgug_http_client_free(http);
+			return 1;
+		}
+
+		if (count > 0) {
+			char id[24];
+
+			sgug_i64toa(cfg.agent_id, id, sizeof(id));
+			printf("%-24s agent %s\n", dir, id);
+			continue;
+		}
+
+		printf("runner    %s\n", cfg.agent_name);
+		printf("group     %s (pool %ld)\n", cfg.pool_name,
+		    (long)cfg.pool_id);
+		printf("agent id  %ld\n", (long)cfg.agent_id);
+		printf("flow      %s\n",
+		    cfg.use_v2_flow ? "v2 broker" : "v1 pool");
+		printf("signing   %s\n",
+		    cfg.require_fips ? "PS256" : "RS256");
 	}
 
-	printf("runner    %s\n", cfg.agent_name);
-	printf("group     %s (pool %ld)\n", cfg.pool_name, (long)cfg.pool_id);
-	printf("agent id  %ld\n", (long)cfg.agent_id);
-	printf("flow      %s\n", cfg.use_v2_flow ? "v2 broker" : "v1 pool");
-	printf("signing   %s\n", cfg.require_fips ? "PS256" : "RS256");
-	printf("\nconfigured. run `runner run` to start listening.\n");
+	if (count > 0)
+		printf("\n%d identities configured. start one `runner run "
+		    "--dir NAME` per identity.\n", count);
+	else
+		printf("\nconfigured. run `runner run` to start listening.\n");
 
 	sgug_http_client_free(http);
 	return 0;
@@ -177,12 +317,20 @@ cmd_remove(int argc, char **argv)
 {
 	sgug_http_client *http;
 	const char *token = NULL;
+	const char *prefix = NULL;
+	char dir[SGUG_MAX_NAME];
 	char err[512];
-	int i, rc;
+	int count = 0;
+	int i, n, rc = 0;
 
 	for (i = 2; i < argc; i++) {
 		if (strcmp(argv[i], "--token") == 0)
 			token = arg_after(argc, argv, &i, "--token");
+		else if (strcmp(argv[i], "--count") == 0)
+			count = num_after(argc, argv, &i, "--count",
+			    SGUG_MAX_IDENTITIES);
+		else if (strcmp(argv[i], "--name-prefix") == 0)
+			prefix = arg_after(argc, argv, &i, "--name-prefix");
 		else {
 			fprintf(stderr, "unknown option %s\n", argv[i]);
 			return 2;
@@ -195,21 +343,41 @@ cmd_remove(int argc, char **argv)
 		return 2;
 	}
 
+	if ((count > 0) != (prefix != NULL)) {
+		fprintf(stderr, "--count and --name-prefix go together\n");
+		return 2;
+	}
+	check_prefix(prefix);
+
 	http = sgug_http_client_new(NULL, SGUG_USER_AGENT);
 	if (http == NULL) {
 		fprintf(stderr, "http client: %s\n", sgug_http_last_error());
 		return 1;
 	}
 
-	err[0] = '\0';
-	rc = sgug_unregister(http, ".", token, err, sizeof(err));
-	if (rc != 0)
-		fprintf(stderr, "removal failed: %s\n", err);
-	else
-		printf("runner removed\n");
+	/* Keeps going after a failure, so one dead identity does not leave the
+	 * rest registered. */
+	for (n = 0; n < (count > 0 ? count : 1); n++) {
+		const char *d = ".";
+
+		if (count > 0) {
+			sgug_snprintf(dir, sizeof(dir), "%s-%d", prefix, n);
+			d = dir;
+		}
+
+		err[0] = '\0';
+		if (sgug_unregister(http, d, token, err, sizeof(err)) != 0) {
+			fprintf(stderr, "removal failed in %s: %s\n", d, err);
+			rc = 1;
+		} else if (count > 0) {
+			printf("runner removed from %s\n", d);
+		} else {
+			printf("runner removed\n");
+		}
+	}
 
 	sgug_http_client_free(http);
-	return rc == 0 ? 0 : 1;
+	return rc;
 }
 
 static volatile sig_atomic_t stop_requested;
@@ -229,14 +397,10 @@ should_abort(void *ctx)
 	return stop_requested != 0;
 }
 
-typedef int (*job_runner)(sgug_http_client *http, const sgug_config *cfg,
-    const char *message, size_t message_len, volatile sig_atomic_t *stop,
-    char *err, size_t errlen);
-
 struct dispatch_ctx {
 	sgug_http_client *http;
 	const sgug_config *cfg;
-	job_runner run_job;
+	sgug_job_runner run_job;
 	int seen;
 };
 
@@ -263,8 +427,9 @@ dispatch_message(void *ctx, const sgug_message *msg)
 	return 0;
 }
 
+/* Also serve's per-child body; hence the executor parameter. */
 static int
-cmd_run(int argc, char **argv)
+run_dir(const char *dir, int verbose, sgug_job_runner run)
 {
 	sgug_listener_opts opts;
 	sgug_config cfg;
@@ -274,26 +439,31 @@ cmd_run(int argc, char **argv)
 	char keypath[SGUG_MAX_URL];
 	char err[512];
 	struct dispatch_ctx dctx;
-	int verbose = 0, i, rc;
+	int rc;
 
-	for (i = 2; i < argc; i++) {
-		if (strcmp(argv[i], "--verbose") == 0)
-			verbose = 1;
-		else if (strcmp(argv[i], "--trace") == 0)
-			verbose = 2;
-		else {
-			fprintf(stderr, "unknown option %s\n", argv[i]);
-			return 2;
-		}
-	}
-
-	if (sgug_config_load(&cfg, ".") != 0) {
-		fprintf(stderr, "no runner configured in this directory; run "
-		    "`runner configure` first\n");
+	if (sgug_config_load(&cfg, dir) != 0) {
+		fprintf(stderr, "no runner configured in %s; run "
+		    "`runner configure` first\n", dir);
 		return 1;
 	}
 
-	sgug_config_path(".", ".rsakey", keypath, sizeof(keypath));
+	/* runjob resolves a relative work folder against the cwd, so without
+	 * this `run --dir X` would put the workspace beside the caller. */
+	if (strcmp(dir, ".") != 0 && cfg.work_folder[0] != '/') {
+		char work[SGUG_MAX_NAME];
+
+		if (sgug_snprintf(work, sizeof(work), "%s/%s", dir,
+		    cfg.work_folder) != (int)(strlen(dir) +
+		    strlen(cfg.work_folder) + 1)) {
+			fprintf(stderr, "%s: work folder path is too long\n",
+			    dir);
+			return 1;
+		}
+		sgug_snprintf(cfg.work_folder, sizeof(cfg.work_folder), "%s",
+		    work);
+	}
+
+	sgug_config_path(dir, ".rsakey", keypath, sizeof(keypath));
 	key = sgug_rsa_load(keypath);
 	if (key == NULL) {
 		fprintf(stderr, "cannot load %s\n", keypath);
@@ -329,6 +499,7 @@ cmd_run(int argc, char **argv)
 	 */
 	{
 		struct sigaction sa;
+		sigset_t mask;
 
 		memset(&sa, 0, sizeof(sa));
 		sa.sa_handler = on_signal;
@@ -336,6 +507,12 @@ cmd_run(int argc, char **argv)
 		sa.sa_flags = 0;
 		sigaction(SIGINT, &sa, NULL);
 		sigaction(SIGTERM, &sa, NULL);
+
+		/* serve blocks both across the fork; see serve.h. */
+		sigemptyset(&mask);
+		sigaddset(&mask, SIGINT);
+		sigaddset(&mask, SIGTERM);
+		sigprocmask(SIG_UNBLOCK, &mask, NULL);
 	}
 	signal(SIGPIPE, SIG_IGN);
 
@@ -346,7 +523,7 @@ cmd_run(int argc, char **argv)
 	opts.key = key;
 	dctx.http = http;
 	dctx.cfg = &cfg;
-	dctx.run_job = sgug_run_job;
+	dctx.run_job = run;
 	dctx.seen = 0;
 
 	opts.on_message = dispatch_message;
@@ -365,6 +542,67 @@ cmd_run(int argc, char **argv)
 	sgug_http_client_free(http);
 	sgug_rsa_free(key);
 	return rc == 0 ? 0 : 1;
+}
+
+static int
+cmd_run(int argc, char **argv)
+{
+	const char *dir = ".";
+	int verbose = 0, i;
+
+	for (i = 2; i < argc; i++) {
+		if (strcmp(argv[i], "--verbose") == 0)
+			verbose = 1;
+		else if (strcmp(argv[i], "--trace") == 0)
+			verbose = 2;
+		else if (strcmp(argv[i], "--dir") == 0)
+			dir = arg_after(argc, argv, &i, "--dir");
+		else {
+			fprintf(stderr, "unknown option %s\n", argv[i]);
+			return 2;
+		}
+	}
+
+	return run_dir(dir, verbose, sgug_run_job);
+}
+
+static int
+cmd_serve(int argc, char **argv)
+{
+	sgug_serve_opts opts;
+	int i;
+
+	memset(&opts, 0, sizeof(opts));
+
+	for (i = 2; i < argc; i++) {
+		if (strcmp(argv[i], "--count") == 0)
+			opts.count = num_after(argc, argv, &i, "--count",
+			    SGUG_MAX_IDENTITIES);
+		else if (strcmp(argv[i], "--name-prefix") == 0)
+			opts.name_prefix = arg_after(argc, argv, &i,
+			    "--name-prefix");
+		else if (strcmp(argv[i], "--image") == 0)
+			opts.image = arg_after(argc, argv, &i, "--image");
+		else if (strcmp(argv[i], "--job-timeout") == 0)
+			opts.job_timeout = num_after(argc, argv, &i,
+			    "--job-timeout", 86400);
+		else if (strcmp(argv[i], "--verbose") == 0)
+			opts.verbose = 1;
+		else if (strcmp(argv[i], "--trace") == 0)
+			opts.verbose = 2;
+		else {
+			fprintf(stderr, "unknown option %s\n", argv[i]);
+			return 2;
+		}
+	}
+
+	if ((opts.count > 0) != (opts.name_prefix != NULL)) {
+		fprintf(stderr, "--count and --name-prefix go together\n");
+		return 2;
+	}
+	check_prefix(opts.name_prefix);
+
+	return sgug_serve(&opts, run_dir);
 }
 
 /* step.c polls the abort flag every 500ms, so this is the added latency. */
@@ -542,12 +780,23 @@ out:
 }
 
 static int
-cmd_status(void)
+cmd_status(int argc, char **argv)
 {
 	sgug_config cfg;
+	const char *dir = ".";
+	int i;
 
-	if (sgug_config_load(&cfg, ".") != 0) {
-		fprintf(stderr, "no runner configured in this directory\n");
+	for (i = 2; i < argc; i++) {
+		if (strcmp(argv[i], "--dir") == 0)
+			dir = arg_after(argc, argv, &i, "--dir");
+		else {
+			fprintf(stderr, "unknown option %s\n", argv[i]);
+			return 2;
+		}
+	}
+
+	if (sgug_config_load(&cfg, dir) != 0) {
+		fprintf(stderr, "no runner configured in %s\n", dir);
 		return 1;
 	}
 
@@ -702,10 +951,12 @@ main(int argc, char **argv)
 		return cmd_remove(argc, argv);
 	if (strcmp(argv[1], "run") == 0)
 		return cmd_run(argc, argv);
+	if (strcmp(argv[1], "serve") == 0)
+		return cmd_serve(argc, argv);
 	if (strcmp(argv[1], "execjob") == 0)
 		return cmd_execjob(argc, argv);
 	if (strcmp(argv[1], "status") == 0)
-		return cmd_status();
+		return cmd_status(argc, argv);
 
 	fprintf(stderr, "unknown command: %s\n\n", argv[1]);
 	return usage(stderr, 2);
