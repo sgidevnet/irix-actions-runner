@@ -15,6 +15,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - `--cancel-file PATH` on `execjob` stops a running job when that file's mtime
   changes. `SIGINT` and `SIGTERM` now cancel the job rather than killing the
   process, so it still reports a result.
+- `runner configure --count N --name-prefix P` registers N runner identities
+  into `P-0`, `P-1`, ..., each with its own `.runner`, `.credentials`, `.rsakey`
+  and work folder, and each carrying an `emulated` label beyond the usual three.
+  `runner run --dir DIR` and `runner status --dir DIR` select one of them;
+  `runner remove --count N --name-prefix P` deregisters all of them and keeps
+  going past a failure.
+- `runner serve` forks one listener per configured identity and runs each job
+  in an ephemeral worker container instead of executing it locally. Linux host
+  only. The parent forwards `SIGTERM` to every child and waits for it, so no
+  pool session is left behind for the next start to retry past.
+  `--image` picks the worker image and `--job-timeout` the wall clock a job
+  gets, which is the only bound on a wedged emulator.
+- `serve` sends `completejob` itself when a worker container dies without the
+  guest having reported. Nothing renews a job lock, so an unreported job
+  otherwise leaves that identity online, at `currentParallelism: 1` and never
+  dispatched to again. A guest that did report writes `complete` into its
+  staging directory, and the fallback stands down.
 
 ### Fixed
 
