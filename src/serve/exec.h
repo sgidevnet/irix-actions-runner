@@ -44,9 +44,14 @@ int sgug_container_run_job(sgug_http_client *http, const sgug_config *cfg,
  * children inherit these. */
 void sgug_container_config(const char *image, int deadline_secs);
 
-/* docker run --rm is the client's job, so a supervisor killed with SIGKILL
- * leaves its container running and the job credentials on disk. This removes
- * both, for every supervisor that is gone. */
+/* Nothing removes a container on the daemon side, so a supervisor killed with
+ * SIGKILL leaves its container running and the job credentials on disk. This
+ * removes both, for every supervisor that is gone. */
 void sgug_container_reap(void);
+
+/* CLOCK_MONOTONIC, where sgug_monotonic_ms is gettimeofday: an NTP step there
+ * retires a job of hours early, or never, and suppresses reaping for the size
+ * of the step. */
+int64_t sgug_container_monotonic_ms(void);
 
 #endif /* SGUG_SERVE_EXEC_H */

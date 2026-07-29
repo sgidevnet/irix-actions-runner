@@ -8,6 +8,10 @@
 .credentials_rsaparams
 _work/
 
+# IRIX disk images. Gigabytes, and not ours to redistribute.
+*.chd
+*.img
+
 # IDE files
 .idea/
 .vscode/

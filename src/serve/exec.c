@@ -7,6 +7,7 @@
 #include "compat/irix.h"
 #include "exec/job.h"
 #include "proto/report.h"
+#include "serve/dockerapi.h"
 #include "serve/exec.h"
 
 #include "version.h"
@@ -14,7 +15,6 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 
 #include <dirent.h>
 #include <errno.h>
@@ -38,12 +38,15 @@
  * read, and JobCancellation cannot reach a wedged emulator. */
 #define DEFAULT_DEADLINE_SECS 14400
 
-/* A staging directory path plus one of the names the contract puts under it. */
 /* A kill that keeps failing while inspect keeps answering would otherwise
  * hold the identity at currentParallelism 1 forever. */
 #define KILL_MAX_TRIES 5
 
+/* A staging directory path plus one of the names the contract puts under it. */
 #define STAGING_PATH_MAX 600
+
+/* One pass reaps this many; the next runs REAP_INTERVAL_SECS later. */
+#define REAP_MAX 64
 
 #define LABEL_SUPERVISOR "sgug.runner.supervisor"
 #define LABEL_STAGING "sgug.runner.staging"
@@ -60,71 +63,16 @@ sgug_container_config(const char *image, int secs)
 		deadline_secs = secs;
 }
 
-/* Returns docker's exit status, or -1 if it could not be run. stderr is left
- * alone so docker's own diagnostics reach the operator. */
 static int
-run_docker(char *const *argv, char *out, size_t outlen)
-{
-	int fds[2];
-	pid_t pid;
-	size_t used = 0;
-	int status = 0;
-
-	if (out != NULL)
-		out[0] = '\0';
-
-	if (pipe(fds) != 0)
-		return -1;
-
-	pid = fork();
-	if (pid < 0) {
-		close(fds[0]);
-		close(fds[1]);
-		return -1;
-	}
-	if (pid == 0) {
-		close(fds[0]);
-		dup2(fds[1], STDOUT_FILENO);
-		close(fds[1]);
-		execvp(argv[0], argv);
-		_exit(127);
-	}
-
-	close(fds[1]);
-	for (;;) {
-		char buf[512];
-		ssize_t n = read(fds[0], buf, sizeof(buf));
-
-		/* Handlers go in without SA_RESTART, so a SIGTERM here would
-		 * truncate the container id and orphan the container. */
-		if (n < 0 && errno == EINTR)
-			continue;
-		if (n <= 0)
-			break;
-		if (out == NULL)
-			continue;
-		/* Stop rather than skip the chunk: appending the next one at
-		 * this offset would splice non-adjacent output. */
-		if (used + (size_t)n >= outlen)
-			break;
-		memcpy(out + used, buf, (size_t)n);
-		used += (size_t)n;
-		out[used] = '\0';
-	}
-	close(fds[0]);
-
-	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-		;
-	return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-}
-
-static void
 remove_container(const char *cid)
 {
-	char *argv[] = { "docker", "rm", "-f", NULL, NULL };
+	char err[256];
 
-	argv[3] = (char *)cid;
-	run_docker(argv, NULL, 0);
+	if (sgug_docker_remove(cid, err, sizeof(err)) != 0) {
+		fprintf(stderr, "remove %.12s: %s\n", cid, err);
+		return -1;
+	}
+	return 0;
 }
 
 static void
@@ -204,70 +152,28 @@ static int
 start_container(const sgug_config *cfg, const char *staging, char *cid,
     size_t cidlen, char *err, size_t errlen)
 {
-	char mount[640], supervisor[64], staged[640], name[SGUG_MAX_NAME + 32];
-	char out[256];
-	char *argv[16];
-	size_t n = 0;
+	sgug_docker_label labels[2];
+	const char *env[1];
+	char bind[640], supervisor[24], name[SGUG_MAX_NAME + 32];
 
 	/*
 	 * :Z relabels the staging directory for this container alone. Without
 	 * it every read inside fails EACCES on an SELinux host. Docker ignores
 	 * the suffix where SELinux is off.
 	 */
-	sgug_snprintf(mount, sizeof(mount), "%s:/job:Z", staging);
-	sgug_snprintf(supervisor, sizeof(supervisor), "%s=%ld",
-	    LABEL_SUPERVISOR, (long)getpid());
-	sgug_snprintf(staged, sizeof(staged), "%s=%s", LABEL_STAGING, staging);
+	sgug_snprintf(bind, sizeof(bind), "%s:/job:Z", staging);
+	sgug_snprintf(supervisor, sizeof(supervisor), "%ld", (long)getpid());
 	sgug_snprintf(name, sizeof(name), "SGUG_RUNNER_NAME=%s",
 	    cfg->agent_name);
 
-	argv[n++] = "docker";
-	argv[n++] = "run";
-	argv[n++] = "-d";
-	argv[n++] = "-v";
-	argv[n++] = mount;
-	argv[n++] = "-e";
-	argv[n++] = name;
-	argv[n++] = "--label";
-	argv[n++] = supervisor;
-	argv[n++] = "--label";
-	argv[n++] = staged;
-	argv[n++] = worker_image;
-	argv[n] = NULL;
+	env[0] = name;
+	labels[0].key = LABEL_SUPERVISOR;
+	labels[0].value = supervisor;
+	labels[1].key = LABEL_STAGING;
+	labels[1].value = staging;
 
-	if (run_docker(argv, out, sizeof(out)) != 0) {
-		sgug_snprintf(err, errlen, "docker run %s failed",
-		    worker_image);
-		return -1;
-	}
-	out[strcspn(out, "\r\n")] = '\0';
-	if (out[0] == '\0') {
-		sgug_snprintf(err, errlen, "docker run %s printed no container "
-		    "id", worker_image);
-		return -1;
-	}
-	sgug_snprintf(cid, cidlen, "%s", out);
-	return 0;
-}
-
-static int
-inspect(const char *cid, int *running, int *code)
-{
-	char *argv[] = { "docker", "inspect", "--format",
-	    "{{.State.Running}} {{.State.ExitCode}}", NULL, NULL };
-	char out[64];
-	const char *sp;
-
-	argv[4] = (char *)cid;
-	if (run_docker(argv, out, sizeof(out)) != 0)
-		return -1;
-
-	sp = strchr(out, ' ');
-	if (sp == NULL)
-		return -1;
-	*running = strncmp(out, "true", 4) == 0;
-	*code = (int)strtol(sp + 1, NULL, 10);
-	return 0;
+	return sgug_docker_run(worker_image, bind, env, 1, labels, 2, cid,
+	    cidlen, err, errlen);
 }
 
 static void
@@ -279,10 +185,8 @@ touch_cancel(const char *staging)
 	utimes(path, NULL);
 }
 
-/* Not sgug_monotonic_ms: that is gettimeofday, and a deadline of hours is long
- * enough for an NTP step to retire the job early or never. */
-static int64_t
-monotonic_ms(void)
+int64_t
+sgug_container_monotonic_ms(void)
 {
 	struct timespec ts;
 
@@ -291,31 +195,26 @@ monotonic_ms(void)
 }
 
 static int
-kill_container(const char *cid)
-{
-	char *argv[] = { "docker", "kill", NULL, NULL };
-
-	argv[2] = (char *)cid;
-	return run_docker(argv, NULL, 0);
-}
-
-static int
 supervise(const char *cid, const char *staging, volatile sig_atomic_t *stop,
     int *cancelled, int *timed_out)
 {
-	int64_t started = monotonic_ms();
+	int64_t started = sgug_container_monotonic_ms();
 	int64_t cancelled_at = 0;
+	char err[256];
 	int killed = 0, misses = 0, kill_fails = 0;
 
 	for (;;) {
 		int64_t now;
 		int running, code, expired, unresponsive;
 
-		if (inspect(cid, &running, &code) != 0) {
+		if (sgug_docker_inspect(cid, &running, &code, err,
+		    sizeof(err)) != 0) {
 			/* Giving up while it still runs would report the job
 			 * from here and let the guest report it again. */
 			if (++misses > INSPECT_MAX_MISSES) {
-				kill_container(cid);
+				fprintf(stderr, "inspect %.12s: %s\n", cid,
+				    err);
+				sgug_docker_kill(cid, err, sizeof(err));
 				return -1;
 			}
 			sleep(POLL_SECS);
@@ -325,7 +224,7 @@ supervise(const char *cid, const char *staging, volatile sig_atomic_t *stop,
 		if (!running)
 			return code;
 
-		now = monotonic_ms();
+		now = sgug_container_monotonic_ms();
 		if (stop != NULL && *stop && !*cancelled) {
 			*cancelled = 1;
 			cancelled_at = now;
@@ -338,10 +237,12 @@ supervise(const char *cid, const char *staging, volatile sig_atomic_t *stop,
 
 		if (!killed && (expired || unresponsive)) {
 			*timed_out = expired;
-			if (kill_container(cid) == 0)
+			if (sgug_docker_kill(cid, err, sizeof(err)) == 0) {
 				killed = 1;
-			else if (++kill_fails > KILL_MAX_TRIES)
+			} else if (++kill_fails > KILL_MAX_TRIES) {
+				fprintf(stderr, "kill %.12s: %s\n", cid, err);
 				return -1;
+			}
 		}
 		sleep(POLL_SECS);
 	}
@@ -406,38 +307,54 @@ sgug_container_run_job(sgug_http_client *http, const sgug_config *cfg,
 	sgug_job job;
 	char staging[512];
 	char cid[80];
-	int cancelled = 0, timed_out = 0;
-	int status, rc = -1;
+	char ferr[256];
+	int cancelled = 0, timed_out = 0, completed = 0;
+	int status, ran = 0, rc = -1;
 
 	if (sgug_job_parse(message, message_len, &job, err, errlen) != 0)
 		return -1;
 
 	if (make_staging(staging, sizeof(staging), message, message_len, err,
 	    errlen) != 0)
-		goto out_job;
+		goto out;
 
 	if (start_container(cfg, staging, cid, sizeof(cid), err, errlen) != 0)
-		goto out_staging;
+		goto out;
 
 	printf("job       %s in %.12s\n", job.job_display_name, cid);
 	fflush(stdout);
 
 	status = supervise(cid, staging, stop, &cancelled, &timed_out);
+	ran = 1;
 	rc = 0;
-
-	if (!guest_completed(staging)) {
+	completed = guest_completed(staging);
+	if (!completed)
 		fprintf(stderr, "container %.12s exited %d%s without a "
 		    "completion; reporting the job from here\n", cid, status,
 		    timed_out ? " on the deadline" : "");
-		rc = fallback_complete(&job,
-		    cancelled ? SGUG_RESULT_CANCELED : SGUG_RESULT_FAILED,
-		    err, errlen);
+
+	/*
+	 * Every path past the parse unwinds through here: the slot was taken
+	 * at acquire, so a daemon that is down or an image that is missing has
+	 * to be reported from here just as a dead container does.
+	 */
+out:
+	if (!completed && fallback_complete(&job,
+	    cancelled ? SGUG_RESULT_CANCELED : SGUG_RESULT_FAILED,
+	    ferr, sizeof(ferr)) != 0) {
+		/* err already names the failure that got us here. */
+		if (rc == 0)
+			sgug_snprintf(err, errlen, "%s", ferr);
+		else
+			fprintf(stderr, "%s\n", ferr);
+		rc = -1;
 	}
 
-	remove_container(cid);
-out_staging:
-	remove_staging(staging);
-out_job:
+	/* A container whose removal failed still has the staging directory
+	 * bind mounted, so leave the pair for the reaper. */
+	if (!ran || remove_container(cid) == 0)
+		remove_staging(staging);
+
 	sgug_job_free(&job);
 	return rc;
 }
@@ -445,44 +362,28 @@ out_job:
 void
 sgug_container_reap(void)
 {
-	char *argv[] = { "docker", "ps", "-a", "--no-trunc", "--filter",
-	    "label=" LABEL_SUPERVISOR, "--format",
-	    "{{.ID}} {{.Label \"" LABEL_SUPERVISOR "\"}} "
-	    "{{.Label \"" LABEL_STAGING "\"}}", NULL };
-	char out[8192];
-	char *line, *next;
+	sgug_docker_container list[REAP_MAX];
+	char err[256];
+	size_t n, i;
+	int truncated;
 
-	if (run_docker(argv, out, sizeof(out)) != 0)
+	/* truncated goes unread: the next pass takes what this one left. */
+	if (sgug_docker_list(LABEL_SUPERVISOR, LABEL_STAGING, list, REAP_MAX,
+	    &n, &truncated, err, sizeof(err)) != 0)
 		return;
 
-	for (line = out; *line != '\0'; line = next) {
-		char *sup, *staging;
-
-		next = strchr(line, '\n');
-		if (next != NULL)
-			*next++ = '\0';
-		else
-			next = line + strlen(line);
-
-		sup = strchr(line, ' ');
-		if (sup == NULL)
-			continue;
-		*sup++ = '\0';
-		staging = strchr(sup, ' ');
-		if (staging != NULL)
-			*staging++ = '\0';
-
+	for (i = 0; i < n; i++) {
 		/* Anything but ESRCH means the process is there, EPERM
 		 * included. A reused pid reads as alive and the container is
 		 * left running, which is the direction to be wrong in. */
-		if (kill((pid_t)strtol(sup, NULL, 10), 0) == 0 ||
+		if (kill((pid_t)strtol(list[i].supervisor, NULL, 10), 0) == 0 ||
 		    errno != ESRCH)
 			continue;
 
-		fprintf(stderr, "reaping %.12s, supervisor %s is gone\n", line,
-		    sup);
-		remove_container(line);
-		if (staging != NULL && *staging == '/')
-			remove_staging(staging);
+		fprintf(stderr, "reaping %.12s, supervisor %s is gone\n",
+		    list[i].id, list[i].supervisor);
+		if (remove_container(list[i].id) == 0 &&
+		    list[i].staging[0] == '/')
+			remove_staging(list[i].staging);
 	}
 }
