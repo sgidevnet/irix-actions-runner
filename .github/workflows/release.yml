@@ -98,6 +98,13 @@ jobs:
           if [ "$hdr" != "$ver" ]; then
             echo "tag says $ver, src/version.h says $hdr"; exit 1
           fi
+
+          # The manpage is hand-written, so its .TH version is the one thing in
+          # it that can go stale without anyone noticing.
+          man=$(sed -n 's/^\.TH RUNNER 1 .*"irix-actions-runner \([^"]*\)".*/\1/p' man/runner.1)
+          if [ "$man" != "$ver" ]; then
+            echo "tag says $ver, man/runner.1 says $man"; exit 1
+          fi
           echo "building $ver from $GITHUB_SHA"
 
       # Each make target is its own step: the per-step deadline is 3600s of wall
@@ -194,9 +201,11 @@ jobs:
           cp build/runner "$name/runner"
           cp contrib/cacert.pem "$name/cert.pem"
           cp README.md LICENSE CHANGELOG.md "$name/"
+          cp man/runner.1 "$name/runner.1"
           strip "$name/runner"
           chmod 0755 "$name/runner"
-          chmod 0644 "$name/cert.pem" "$name/README.md" "$name/LICENSE" "$name/CHANGELOG.md"
+          chmod 0644 "$name/cert.pem" "$name/README.md" "$name/LICENSE" \
+              "$name/CHANGELOG.md" "$name/runner.1"
 
           # The binary still has to work after stripping.
           (cd "$name" && env -i ./runner version)

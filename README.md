@@ -22,6 +22,10 @@ that runs a pool of emulated Indys in parallel, one per job.
   [writing workflows](#writing-workflows) against it
 - [Runner identity](#runner-identity) and [confinement](#confinement)
 
+`runner help` lists every command and flag. [`man/runner.1`](man/runner.1) is
+the full reference, with the defaults, ranges and failure modes that do not fit
+there; it ships in the tarball as `runner.1`.
+
 ## How a job executes
 
 The runtime is split client/server, and one binary is both halves. The server

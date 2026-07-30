@@ -277,6 +277,11 @@ Before opening a pull request:
    exists. `reference.md` cites a `file:line` per row, so grep it for the file
    you touched. `README.md` carries the same facts in shorter form under
    `What works` and `Writing workflows`.
+5. If the change adds, removes or retimes a command or a flag, update both
+   `usage()` in `src/main.c` and `man/runner.1`. The manpage is hand-written
+   and carries what `usage()` cannot: defaults, valid ranges, which flags
+   exclude each other, and what each command writes to disk. Only the `.TH`
+   version is checked mechanically, by the release workflow.
 
 When reporting results, say what you actually observed. If a step was skipped,
 say so. If something is inferred from reading source rather than observed on
