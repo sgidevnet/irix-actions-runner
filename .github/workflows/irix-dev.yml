@@ -18,8 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # cc is MIPSPro, which the emulated guest carries. The Octane builds with
-      # SGUG gcc; irix.yml is the realistic twin.
+      # cc is MIPSPro. It prints a licensing failure on this guest and compiles
+      # anyway, exit 0. The Octane builds with SGUG gcc.
       - name: Build something small
         run: |
           uname -a
@@ -28,6 +28,7 @@ jobs:
           #include <stdio.h>
           int main(void){ printf("built on IRIX\n"); return 0; }
           EOF
+          rm -f out/hello
           cc -O2 -o out/hello hello.c
           ./out/hello
           file out/hello
@@ -38,9 +39,12 @@ jobs:
           echo "fsize:  $(ulimit -f)"
           echo "core:   $(ulimit -c)"
           echo "cpu:    $(ulimit -t)"
-          # seek past the cap instead of filling to it: RLIMIT_FSIZE is on the
-          # resulting size, so one block at 5 GB fails the same way. Writing the
-          # whole 4 GB through emulated SCSI cost 81 s of a 105 s job.
+          # seek past the cap instead of filling to it: RLIMIT_FSIZE bounds the
+          # offset a write may reach, so one block at 5 GB fails the same way
+          # and sparseness cannot dodge it. Filling cost 81 s of a 105 s job.
+          echo "--- a write inside the cap must succeed ---"
+          dd if=/dev/zero of=small.bin bs=1048576 count=1 seek=100
+          rm -f small.bin
           echo "--- a write past the 4GB file cap must fail ---"
           if dd if=/dev/zero of=big.bin bs=1048576 count=1 seek=5000 2>/dev/null; then
             echo "UNEXPECTED: the write was not capped"; rm -f big.bin; exit 1

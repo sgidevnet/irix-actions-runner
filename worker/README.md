@@ -16,7 +16,7 @@ These must sit beside the Dockerfile. None is in this repository:
 | `nvram.bin` | PROM settings, carrying the MAC address and `console=d` |
 | `indy.chd` | an IRIX 6.5 Indy disk image, supplied by the operator |
 | `indy.chd.diff.chd` | the guest customisations below |
-| `saves/golden/`, `saves/.cas/` | the snapshot the entrypoint restores, taken at a logged-in root shell. Matched to `indy.chd.diff.chd`, so retake it whenever that changes. Omit both to fall back to a cold boot |
+| `saves/golden/`, `saves/.cas/` | the snapshot the entrypoint restores, taken at a logged-in root shell. Matched to `indy.chd.diff.chd` and to the emulator build, so retake it whenever either changes. Omit the directory to fall back to a cold boot |
 
 ```
 docker build -t irix-worker:latest .
@@ -59,6 +59,10 @@ install has the file, the slim guest did not, and `actions/checkout` failed the
 clone with a certificate error while the runner's own HTTPS worked.
 
 **The runner and its job script**, at `/usr/local/runner/`.
+
+MIPSPro is on the base image but unlicensed. `cc` prints `No such feature exists
+(-5,116)` and then compiles anyway, exit 0, so a workflow that builds with it
+succeeds with two dozen lines of licensing noise in the log.
 
 ## Why it restores instead of cold booting
 

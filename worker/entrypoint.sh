@@ -41,8 +41,7 @@ if [ -d "saves/$SNAPSHOT" ]; then
 	$CI restore -q "$SNAPSHOT" || fail "restore of $SNAPSHOT failed"
 	# The snapshot was captured at a logged-in root shell, so no login here.
 else
-	# No snapshot baked into the image. The saved NVRAM autoboots, so the
-	# maintenance menu never appears. Timeouts here are seconds.
+	# The saved NVRAM autoboots, so the maintenance menu never appears.
 	$CI serial-wait --timeout "$BOOT_TIMEOUT" -q "console login:" ||
 		fail "guest did not reach a login prompt"
 	$CI login root -q || fail "login failed"
@@ -51,7 +50,8 @@ fi
 # The guest clock resumes at snapshot time, and completejob rejects the stale
 # started_at that produces. There is no rtc-set verb and IRIX date has no %s,
 # so set it over the console from the host's UTC.
-$CI run --shell sh --timeout 60 -q "date -u $(date -u +%m%d%H%M%Y)" >/dev/null 2>&1
+$CI run --shell sh --timeout 60 -q "date -u $(date -u +%m%d%H%M%Y)" >/dev/null 2>&1 ||
+	fail "could not set the guest clock"
 
 # --shell sh on every run: iris-ci defaults to csh and scrapes $status, while
 # root's shell is bash. noac because the guest polls cancel for an mtime
