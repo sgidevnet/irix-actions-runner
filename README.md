@@ -8,15 +8,15 @@ needing only `libc.so.1`, `libpthread.so` and `libm.so`, all IRIX base. OpenSSL
 is linked statically and the trust roots ship alongside it.
 
 The runtime is split client/server. The server holds the registration and
-long-polls GitHub for work. The client executes one job from a message file and
-reports it.
+long-polls GitHub for work. The client is the job runtime: it executes one job
+from a message file and reports it.
 
-- **On an SGI**, `runner run` is both halves in one process. Steps execute on
-  the machine.
-- **On a Linux host with Docker**, `runner serve` is the server for a pool of
-  registered identities. Each job it accepts gets a container holding an
-  emulated Indy, which mounts the message at `/job` and runs `runner execjob`
-  inside IRIX.
+- **[On an SGI](#getting-started-on-an-sgi)**, `runner run` is both halves in
+  one process, a standalone job server. Steps execute on the machine.
+- **[On a Linux host with Docker](#getting-started-on-linux)**, `runner serve`
+  is the server for a pool of dockerised Indy VMs, one per job, emulated by
+  [iris](https://github.com/techomancer/iris). The client runs inside IRIX
+  against the message mounted at `/job`.
 
 ## Getting started on an SGI
 
@@ -83,8 +83,7 @@ it builds figlet from upstream and shows what breaks on IRIX.
 
 ## Getting started on Linux
 
-Steps still execute on IRIX: each job gets its own emulated Indy in a
-container. What you provide is a Linux host with Docker.
+You need a Linux host with Docker, and a GitHub repository you can administer.
 
 **1. Build.** The parser output is committed, so this is the whole toolchain:
 
@@ -93,7 +92,7 @@ sudo apt-get install -y libssl-dev
 make
 ```
 
-**2. Register a pool.** One registration token registers all of them:
+**2. Register a pool.** One registration token covers the whole pool:
 
 ```sh
 ./runner configure --url https://github.com/OWNER/REPO --token <token> \
@@ -115,8 +114,7 @@ RSA key of its own from here on. 64 identities is the ceiling.
 One parent process and one child per identity, each long-polling on its own. A
 job a child accepts is written to a staging directory under `$TMPDIR`, mode
 0700, and bind mounted at `/job` in a fresh container. The guest restores a
-snapshot of a booted IRIX rather than cold booting: 13.92 s mean over 12 trials
-against 246.60 s.
+snapshot of a booted IRIX rather than cold booting.
 
 Ctrl-C or `SIGTERM` forwards to every child once and then waits for all of
 them, so no identity is left holding a pool session. A `serve` that starts
@@ -134,8 +132,7 @@ after an unclean exit reaps the containers its predecessor left behind.
   reports, so a build can pass here and fault on real hardware.
 - **Every job starts clean**, which inverts the workspace caveat below.
   `actions/checkout` re-clones on every job and nothing incremental survives.
-- **Budget 583 MiB and about one core per job.** Ten in parallel finished in
-  28 s on an 80-core host.
+- **Budget 583 MiB and about one core per job.**
 - **Outbound ping does not work** in a default container. iris opens an
   unprivileged ICMP socket, which needs `net.ipv4.ping_group_range` to cover
   the process GID, and Docker's default is `1 0`. Ping to the emulator's own
