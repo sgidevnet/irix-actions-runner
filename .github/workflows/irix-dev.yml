@@ -18,6 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # cc is MIPSPro, which the emulated guest carries. The Octane builds with
+      # SGUG gcc; irix.yml is the realistic twin.
       - name: Build something small
         run: |
           uname -a
@@ -26,7 +28,7 @@ jobs:
           #include <stdio.h>
           int main(void){ printf("built on IRIX\n"); return 0; }
           EOF
-          gcc -O2 -o out/hello hello.c
+          cc -O2 -o out/hello hello.c
           ./out/hello
           file out/hello
 
