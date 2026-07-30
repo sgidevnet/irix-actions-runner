@@ -4,9 +4,9 @@
 
 A native GitHub Actions self-hosted runner for SGI IRIX 6.5.22 and later.
 GitHub's official runner is .NET and cannot run there, so this is a clean-room
-reimplementation of the runner wire protocol in C99. It ships as one n32 binary
-needing only `libc.so.1`, `libpthread.so` and `libm.so`, all IRIX base, with
-OpenSSL linked statically and the trust roots alongside it.
+reimplementation of the runner wire protocol in C99. Ships as a single n32
+binary with IRIX base libraries and a statically linked OpenSSL as its only
+dependencies.
 
 Run it [on the SGI itself](#on-an-sgi), or [on a Linux host](#on-a-linux-host)
 that gives every job its own emulated Indy.
