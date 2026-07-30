@@ -1,0 +1,102 @@
+name: scratch indy
+
+# Temporary. Runs the release job's IRIX steps on the emulated pool to find out
+# what a tag would actually hit: tool availability and the 3600s per-step cap.
+# Delete before merging.
+
+on:
+  push:
+    branches: [release/unglaze]
+
+permissions:
+  contents: read
+
+jobs:
+  build-irix:
+    runs-on: [self-hosted, irix]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Clean the workspace and check the toolchain
+        run: |
+          set -eu
+          uname -a
+          git clean -xdff
+          for t in git tar gzip sha256sum readelf strings file sed awk; do
+            command -v "$t" >/dev/null && echo "have $t" || echo "MISSING $t"
+          done
+          tar --version | sed -n 1p
+          /usr/sgug/bin/gcc --version | sed -n 1p
+          test -x /usr/bin/c99 && echo "have /usr/bin/c99" || echo "MISSING /usr/bin/c99"
+
+      - name: Portability gate
+        run: |
+          set -eu
+          make clean
+          make check
+
+      - name: Unit tests
+        run: |
+          set -eu
+          make -j2 test
+
+      - name: Build
+        run: |
+          set -eu
+          make -j2
+          ls -l build/runner
+
+      - name: The binary is portable to any IRIX 6.5 machine
+        run: |
+          set -eu
+          desc=$(file build/runner)
+          echo "$desc"
+          case "$desc" in
+            *MIPS-IV*) echo "ISA is MIPS IV; that excludes R4000 and R5000"; exit 1 ;;
+            *N32*MIPS-III*) ;;
+            *) echo "expected an N32 MIPS-III object"; exit 1 ;;
+          esac
+          case "$desc" in *MSB*) ;; *) echo "not big-endian"; exit 1 ;; esac
+
+          readelf -d build/runner | grep -E 'NEEDED|RPATH'
+          needed=$(readelf -d build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
+          if [ "$needed" != "libc.so.1 libm.so libpthread.so " ]; then
+            echo "unexpected library dependencies: $needed"; exit 1
+          fi
+          echo "--- clean environment ---"
+          env -i ./build/runner version
+
+      - name: TLS works against the bundle we ship
+        run: |
+          set -eu
+          ca="$PWD/contrib/cacert.pem"
+          if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
+            echo "selftest passed with a nonexistent bundle"; exit 1
+          fi
+          echo "negative control ok"
+          SSL_CERT_FILE="$ca" ./build/runner selftest
+
+      - name: Package
+        run: |
+          set -eu
+          name=scratch-pack
+          rm -rf dist "$name"
+          mkdir -p "$name" dist
+          cp build/runner "$name/runner"
+          cp contrib/cacert.pem "$name/cert.pem"
+          cp README.md LICENSE CHANGELOG.md "$name/"
+          cp man/runner.1 "$name/runner.1"
+          strip "$name/runner"
+          chmod 0755 "$name/runner"
+          (cd "$name" && env -i ./runner version)
+          strings -a build/runner | grep '^OpenSSL 1\.' | sed -n 1p
+          tar --format=ustar --owner=0 --group=0 --numeric-owner --sort=name \
+              --mtime="@$(git log -1 --format=%ct)" -cf "dist/$name.tar" "$name"
+          gzip -9n "dist/$name.tar"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          cat "dist/$name.tar.gz.sha256"
+          ls -l dist
