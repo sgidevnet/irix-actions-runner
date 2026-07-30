@@ -73,8 +73,7 @@ job message carries the credentials it reports with.
 | `uses:` steps | `git` 2.18+, `zip` and `unzip`, inside the guest |
 
 Built and tested on IRIX 6.5.30m. Earlier 6.5.x releases are expected to work
-and are untested. The Linux binaries are built on Ubuntu 24.04, which is where
-the glibc floor comes from; an older distribution needs a build from source.
+and are untested. The Linux binaries are built on Ubuntu 24.04.
 
 The IRIX tarball carries `cert.pem`, found automatically when it sits next to
 the binary. `SSL_CERT_FILE` overrides it, and SGUG-RSE's own bundle at

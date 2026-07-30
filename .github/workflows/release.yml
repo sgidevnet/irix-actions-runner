@@ -484,10 +484,9 @@ jobs:
 
               gzip -dc irix-actions-runner-*.tar.gz | tar xvf -
 
-          **Linux x86_64 and arm64**, built on Ubuntu 24.04, so glibc 2.39 is
-          the floor and the host supplies OpenSSL 3. No `cert.pem` ships: every
-          distribution maintains its own trust store, and `SSL_CERT_FILE`
-          overrides it. Docker is needed for `runner serve`.
+          **Linux x86_64 and arm64**, built on Ubuntu 24.04. Needs glibc 2.39
+          and OpenSSL 3 from the host, and Docker for `runner serve`. No
+          `cert.pem` ships; `SSL_CERT_FILE` overrides the system trust store.
 
           Built and tested on IRIX 6.5.30m. Earlier 6.5.x releases and other SGI
           models are expected to work and are untested. See `BUILD-INFO` in each
