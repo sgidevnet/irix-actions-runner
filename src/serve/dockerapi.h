@@ -21,6 +21,13 @@ typedef struct {
 } sgug_docker_container;
 
 /*
+ * The daemon's version string, and the cheapest check that the socket is
+ * usable at all: it is mode 0660 root:docker, so an account outside that group
+ * fails here with EACCES from connect(2).
+ */
+int sgug_docker_ping(char *version, size_t verlen, char *err, size_t errlen);
+
+/*
  * bind is one HostConfig Binds entry and env holds NAME=VALUE strings. An
  * image the daemon does not have is pulled. A container that fails to start
  * is removed before returning.

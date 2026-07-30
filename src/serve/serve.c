@@ -5,6 +5,7 @@
 
 #include "compat/irix.h"
 #include "proto/config.h"
+#include "serve/dockerapi.h"
 #include "serve/exec.h"
 #include "serve/serve.h"
 
@@ -33,6 +34,25 @@ struct child {
 	pid_t pid;
 	char dir[SGUG_MAX_NAME];
 };
+
+/*
+ * serve does not touch the daemon until a job has been acquired, so without
+ * this the socket is found out about one dispatched and failed job at a time.
+ */
+int
+sgug_serve_selftest(void)
+{
+	char version[64], err[256];
+
+	if (sgug_docker_ping(version, sizeof(version), err, sizeof(err)) != 0) {
+		printf("docker    %s\n", err);
+		printf("          serve runs each job in a container and\n");
+		printf("          needs this socket; `run` does not\n");
+		return -1;
+	}
+	printf("docker    engine %s\n", version);
+	return 0;
+}
 
 int
 sgug_serve(const sgug_serve_opts *opts, sgug_listen_dir fn)

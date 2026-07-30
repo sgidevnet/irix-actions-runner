@@ -38,6 +38,10 @@ typedef int (*sgug_listen_dir)(const char *dir, int verbose,
 	    fputs("serve drives the container executor and runs on a Linux " \
 	    "host, not on IRIX\n", stderr), 2)
 
+/* Nothing for selftest to report: `run` is the only executor here and it needs
+ * no daemon. */
+#define sgug_serve_selftest() 0
+
 #else
 
 /*
@@ -52,6 +56,13 @@ typedef int (*sgug_listen_dir)(const char *dir, int verbose,
  * both are blocked across the fork.
  */
 int sgug_serve(const sgug_serve_opts *opts, sgug_listen_dir fn);
+
+/*
+ * The container executor's half of `selftest`, written to stdout in the same
+ * label column as the rest of the report. Returns -1 when serve would not get
+ * as far as starting a container on this host.
+ */
+int sgug_serve_selftest(void);
 
 #endif /* __sgi */
 

@@ -59,7 +59,8 @@ usage(FILE *to, int rc)
 	      "  remove --token TOKEN [--count N --name-prefix P]\n"
 	      "      deregister and delete local configuration\n"
 	      "  status [--dir DIR]     show the configured runner\n"
-	      "  selftest [host]        check TLS, certificates, HTTP and clock\n"
+	      "  selftest [host]        check TLS, certificates, HTTP, clock\n"
+	      "                         and, on Linux, the docker socket\n"
 	      "  version                print the version of this runner\n"
 	      "  help                   print this message\n",
 	      to);
@@ -818,6 +819,9 @@ cmd_status(int argc, char **argv)
  * modes separated. On a freshly imaged IRIX box the usual causes are an expired
  * CA bundle and an undisciplined clock, and both otherwise surface much later
  * as an unexplained 401 during OAuth.
+ *
+ * A Linux host gets both of those right from NTP and the distro bundle, so the
+ * docker socket is the one that actually decides whether `serve` works.
  */
 static int
 selftest(const char *host)
@@ -883,6 +887,9 @@ selftest(const char *host)
 		goto out;
 	}
 	printf("keepalive second request returned %d\n", sgug_http_status(r));
+
+	if (sgug_serve_selftest() != 0)
+		goto out;
 
 	printf("\nselftest OK\n");
 	rc = 0;

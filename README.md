@@ -167,6 +167,7 @@ Push it and watch the job run on your SGI.
 
 You need Docker and a GitHub repository you can administer. `serve` needs read
 and write on `/var/run/docker.sock`, which usually means the `docker` group.
+`./runner selftest` reports whether this account has it.
 
 **1. Install.** Download the Linux tarball from the
 [releases page](https://github.com/sgidevnet/irix-actions-runner/releases).
