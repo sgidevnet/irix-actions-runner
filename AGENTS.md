@@ -153,6 +153,10 @@ cd /tmp/pool && ./runner serve --count 4 --name-prefix irix \
 gh workflow run irix-dev.yml --ref <branch>
 ```
 
+**Always pass `--image`.** The default is the bare name `irix-worker:latest`,
+which Docker resolves against Docker Hub, so omitting it fails on a pull for an
+image that does not exist there. `ghcr.io/sgidevnet/irix-worker` is ours.
+
 Kill a pool by a substring that cannot match your own command line. `pkill -f
 "runner serve"` matches the shell that is running it and takes the session down
 with it. Kill and restart in separate commands, never one chain.
