@@ -104,8 +104,8 @@ the step when the producer dies. Use `sed -n 1p`.
 `emulated`, and an operator can add more with `configure --labels`.
 
 `runs-on:` is an AND over labels with no negation, so `emulated` pins a job to
-the Docker pool while nothing excludes it. Keeping a job on real hardware needs
-a label those runners carry and the pool does not.
+the Docker pool while nothing excludes it. Keeping a job off it needs a label
+those other runners carry and the pool does not.
 
 An organisation runner can also be withheld by its runner group, in which case
 it shows Online and the job queues forever. That is an operator setting, not

@@ -11,7 +11,7 @@ test packages on the hardware it targets.
 
 Two compilers must accept every source file: GCC 9.2 from SGUG-RSE, which
 produces the shipping binary, and MIPSPro 7.4.4m, which is a compile-only
-portability gate. Behaviour is verified on real hardware.
+portability gate. Behaviour is verified on IRIX.
 </project>
 
 <critical_constraints>
