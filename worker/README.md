@@ -8,14 +8,15 @@ these per job, and needs `--image` to point at it.
 
 ## Building
 
-Five files must sit beside the Dockerfile. None is in this repository:
+These must sit beside the Dockerfile. None is in this repository:
 
 | file | what it is |
 |---|---|
-| `iris`, `iris-ci` | the emulator, built `--release --features chd,lightning,rex-jit` |
+| `iris`, `iris-ci` | the emulator, built `--release --features chd,lightning,rex-jit`, carrying the L1D tag fix |
 | `nvram.bin` | PROM settings, carrying the MAC address and `console=d` |
 | `indy.chd` | an IRIX 6.5 Indy disk image, supplied by the operator |
 | `indy.chd.diff.chd` | the guest customisations below |
+| `saves/golden/`, `saves/.cas/` | the snapshot the entrypoint restores, taken at a logged-in root shell. Matched to `indy.chd.diff.chd`, so retake it whenever that changes. Omit both to fall back to a cold boot |
 
 ```
 docker build -t irix-worker:latest .
@@ -53,11 +54,30 @@ than a missing bundle.
 
 **The runner and its job script**, at `/usr/local/runner/`.
 
-## Why it cold boots
+## Why it restores instead of cold booting
 
-`iris-ci restore` takes about 0.6 s, so a snapshot would be the obvious way to
-start a job. It does not survive this guest. Restoring a snapshot taken with an
-NFS mount live panics IRIX with `stack underflow/overflow`; taken without one,
-the guest stops answering on the serial console although the emulator itself is
-healthy. Cold boot takes about five minutes, which is small against an IRIX
-build.
+Measured on one host, same image and same job message: cold boot 251.96 s,
+restore 15.77 s, with byte-identical job logs. `restore` itself is under 1.2 s;
+most of what remains is a 5.8 s NFS mount.
+
+This needs an `iris` carrying the L1D tag fix (`techomancer/iris#61`). Before
+it, restoring a booted guest panicked every time, 6 attempts out of 6 on the
+published `0.3.0-indy` binaries, with a page-cache panic:
+
+```
+PANIC: pcache_remove_pfdat couldn't find pfd 0x884198a0, pcache 0x92bbfdf0, ...
+```
+
+An earlier revision of this file gave that panic as `stack underflow/overflow`
+and blamed the NFS mount. Both were wrong. The string does not appear at all,
+and a snapshot taken with the mount live restores as cleanly as one taken
+without. Also note the guest still answers `echo ALIVE` while it dumps core, so
+liveness alone does not detect the failure; `/job` never becoming readable does.
+
+The other symptom that revision described, a guest that goes mute on the serial
+console, is real but is not the same bug. It is sequencing: restoring into a
+machine whose CPU has never run wedges it permanently while the emulator keeps
+burning a core. `entrypoint.sh` waits for the PROM banner before restoring.
+
+If `saves/$SNAPSHOT` is absent from the image, the entrypoint falls back to a
+cold boot, so an image built without a snapshot still works.
