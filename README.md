@@ -7,7 +7,18 @@ reimplementation of the runner wire protocol in C99. It ships as one n32 binary
 needing only `libc.so.1`, `libpthread.so` and `libm.so`, all IRIX base. OpenSSL
 is linked statically and the trust roots ship alongside it.
 
-## Getting started
+The runtime is split client/server. The server holds the registration and
+long-polls GitHub for work. The client executes one job from a message file and
+reports it.
+
+- **On an SGI**, `runner run` is both halves in one process. Steps execute on
+  the machine.
+- **On a Linux host with Docker**, `runner serve` is the server for a pool of
+  registered identities. Each job it accepts gets a container holding an
+  emulated Indy, which mounts the message at `/job` and runs `runner execjob`
+  inside IRIX.
+
+## Getting started on an SGI
 
 You need an SGI running IRIX 6.5.22 or later on an R4000 or later CPU, and a
 GitHub repository you can administer.
@@ -70,6 +81,70 @@ For a real one, see
 [irix-actions-figlet-demo](https://github.com/sgidevnet/irix-actions-figlet-demo):
 it builds figlet from upstream and shows what breaks on IRIX.
 
+## Getting started on Linux
+
+Steps still execute on IRIX: each job gets its own emulated Indy in a
+container. What you provide is a Linux host with Docker.
+
+**1. Build.** The parser output is committed, so this is the whole toolchain:
+
+```sh
+sudo apt-get install -y libssl-dev
+make
+```
+
+**2. Register a pool.** One registration token registers all of them:
+
+```sh
+./runner configure --url https://github.com/OWNER/REPO --token <token> \
+    --count 4 --name-prefix irix
+```
+
+That writes `irix-0` through `irix-3`, each holding its own `.runner`,
+`.credentials` and `.rsakey`, and each named after its directory. The
+registration token is not needed again: every identity authenticates with an
+RSA key of its own from here on. 64 identities is the ceiling.
+
+**3. Serve.**
+
+```sh
+./runner serve --count 4 --name-prefix irix \
+    --image ghcr.io/sgidevnet/irix-worker:0.4.3-indy
+```
+
+One parent process and one child per identity, each long-polling on its own. A
+job a child accepts is written to a staging directory under `$TMPDIR`, mode
+0700, and bind mounted at `/job` in a fresh container. The guest restores a
+snapshot of a booted IRIX rather than cold booting: 13.92 s mean over 12 trials
+against 246.60 s.
+
+Ctrl-C or `SIGTERM` forwards to every child once and then waits for all of
+them, so no identity is left holding a pool session. A `serve` that starts
+after an unclean exit reaps the containers its predecessor left behind.
+
+**4. Uninstall.**
+
+```sh
+./runner remove --token <token> --count 4 --name-prefix irix
+```
+
+### What is different under Docker
+
+- **This is not a portability gate.** iris decodes MIPS IV whatever CPU it
+  reports, so a build can pass here and fault on real hardware.
+- **Every job starts clean**, which inverts the workspace caveat below.
+  `actions/checkout` re-clones on every job and nothing incremental survives.
+- **Budget 583 MiB and about one core per job.** Ten in parallel finished in
+  28 s on an 80-core host.
+- **Outbound ping does not work** in a default container. iris opens an
+  unprivileged ICMP socket, which needs `net.ipv4.ping_group_range` to cover
+  the process GID, and Docker's default is `1 0`. Ping to the emulator's own
+  NAT gateway is answered synthetically and still works.
+
+`serve` talks to `/var/run/docker.sock`, or to `DOCKER_HOST` when that names a
+`unix://` path; any other form is an error rather than a silent fallback. There
+is no compose file and no server image.
+
 ## Requirements
 
 | | |
@@ -79,6 +154,7 @@ it builds figlet from upstream and shows what breaks on IRIX.
 | `run:` steps | nothing beyond base IRIX |
 | `uses:` steps | `git` 2.18+, `zip` and `unzip` |
 | Building from source | [SGUG-RSE](https://github.com/sgidevnet/sgug-rse) 0.0.7beta at `/usr/sgug`, for GCC 9.2 and OpenSSL 1.1.1d |
+| Linux host instead | Docker, and `gcc` plus `libssl-dev` to build |
 
 Built and tested on IRIX 6.5.30m. Earlier 6.5.x releases are expected to work
 and are untested.
@@ -88,7 +164,7 @@ binary. `SSL_CERT_FILE` overrides it, and SGUG-RSE's own bundle at
 `/usr/sgug/etc/pki/tls/cert.pem` is used when neither is present.
 
 Configuration is written beside the binary as `.runner`, `.credentials` and
-`.rsakey`, mode 0600.
+`.rsakey`, or one set per identity directory under `--count`.
 
 ## What works
 
@@ -112,8 +188,8 @@ Configuration is written beside the binary as `.runner`, `.credentials` and
 | JavaScript actions | no |
 | Container jobs, Docker actions, service containers | no |
 
-Anything unsupported fails with a named error rather than hanging or passing
-silently.
+Every row holds in both run modes. Most of what is unsupported fails with a
+named error rather than hanging; the handful that pass silently are below.
 
 ## Writing workflows
 
@@ -130,15 +206,29 @@ Most workflow YAML works unchanged. `${{ }}` is evaluated in a `run:` body, a
 | `steps` context | no, needs `$GITHUB_OUTPUT`; fails the step by name |
 | Case folding above ASCII | no, `'Ü' == 'ü'` is false where GitHub says true |
 
-Three things to write differently.
+Six things to write differently. The first four produce no error at all.
 
 | Instead of | Write |
 |---|---|
 | `$NAME` from an `env:` block | The value in the `run:` text. `env:` is readable as `${{ env.NAME }}` but is not exported to the step's shell |
 | `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `::` commands | Nothing. Steps cannot pass values to each other, and no `GITHUB_TOKEN` reaches them |
-| `timeout-minutes:` on a step | Nothing. It is parsed and ignored; every step gets 3600 seconds. Job-level `timeout-minutes` is server-side and works |
+| `timeout-minutes:` on a step | Nothing. It is parsed and ignored; every step gets 3600 seconds, and a step that hits that cancels the job. Job-level `timeout-minutes` is server-side and works |
+| `ref:` on `checkout` | A `run:` step with `git`. `ref:` is read only when `github.sha` is empty, which no real trigger produces |
+| A nested `path:` on `checkout` or `download-artifact` | One level. Both `mkdir` exactly once, so `path: all/0` fails |
+| `path: out` on `upload-artifact`, expecting GitHub's layout | It is `zip -r out`, so the members are `out/...` where the reference action strips that component and a download lands one level deeper |
 
-Steps run under `-e`, and bash steps under `-o pipefail`, matching GitHub.
+Steps run under `-e`, and bash steps under `-o pipefail`, matching GitHub. But
+`shell:` only understands `bash` and absolute paths: any other value falls
+through to bash, so `shell: python` runs your Python as a shell script.
+
+`.agents/skills/irix-workflows/` is the full matrix, cited to source, as an
+[Agent Skill](https://agentskills.io). Copy the directory into your own
+repository to give an agent writing workflows there the same rules.
+
+`.agents/` is the neutral path. `.claude/skills/`, `.gemini/skills/`,
+`.opencode/skills/` and `.cursor/skills/` are symlinks into it, because each
+agent scans its own directory. Copilot and Cursor Rules read a different format
+and are not covered.
 
 JavaScript actions are not planned. V8 dropped its MIPS backends in 2023, and
 Node sits on libuv, which has no IRIX backend. Run JS steps on a hosted runner
@@ -193,8 +283,10 @@ jobs:
       - run: ./run-tests.sh
 ```
 
-There is no IRIX emulator worth substituting for the hardware. QEMU has no SGI
-machine model and MAME's Indy emulation does not run 6.5 usefully.
+QEMU has no SGI machine model and MAME's Indy emulation does not run 6.5
+usefully. [iris](https://github.com/techomancer/iris) does, and is what the
+Linux mode uses, but it decodes MIPS IV whatever CPU it reports: it will tell
+you a package builds, not that it runs on an R4400.
 
 ## Confinement
 
@@ -216,6 +308,9 @@ lower `RLIMIT_AS`.
 This bounds accidents, not adversaries. `chroot` plus an unprivileged uid plus
 rlimits is the entire toolbox IRIX provides: no namespaces, no seccomp, no
 jails, no network isolation, so a step can reach the local network.
+
+Under `serve` the step runs in an emulated machine inside a container, and the
+emulator's network is userspace NAT.
 
 For untrusted input, use GitHub's fork pull request approval setting under
 Settings, Actions, General. No local confinement substitutes for it.
