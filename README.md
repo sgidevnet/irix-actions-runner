@@ -16,8 +16,8 @@ that runs a pool of emulated Indys in parallel, one per job.
   [what differs under Docker](#what-is-different-under-docker)
 - [Requirements](#requirements) and
   [building from source](#building-from-source)
-- Setting one up [on an SGI](#on-an-sgi) or
-  [on a Linux host](#on-a-linux-host)
+- Setting one up [on an SGI](#on-an-sgi), [on a Linux host](#on-a-linux-host),
+  or [for an organisation](#organisation-runners)
 - [What works](#what-works), and
   [writing workflows](#writing-workflows) against it
 - [Runner identity](#runner-identity) and [confinement](#confinement)
@@ -204,6 +204,26 @@ after an unclean exit reaps the containers its predecessor left behind.
 `DOCKER_HOST` overrides the socket path when it names a `unix://` socket; any
 other form is an error rather than a silent fallback. There is no compose file
 and no server image.
+
+## Organisation runners
+
+`--url` takes an organisation as readily as a repository, which is how one pool
+serves every repository in it:
+
+```sh
+gh api -X POST orgs/ORG/actions/runners/registration-token --jq .token
+./runner configure --url https://github.com/ORG --token <token> \
+    --count 4 --name-prefix irix --runnergroup IRIX
+```
+
+`--runnergroup` defaults to `Default`, and getting it wrong is quiet: the
+runner registers, shows Online, and is never dispatched to, because the group
+it landed in has no access to the repository whose workflow is queued. The
+group's repository access is under the organisation's Actions settings.
+
+Every runner carries `irix`, `mips` and `mips-n32`. `--count` adds `emulated`,
+so `runs-on: [self-hosted, irix, emulated]` pins a job to the Docker pool and
+leaving it off does not. `--labels a,b,c` adds your own on top.
 
 ## What works
 
