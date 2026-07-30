@@ -85,7 +85,7 @@ it builds figlet from upstream and shows what breaks on IRIX.
 
 You need a Linux host with Docker, and a GitHub repository you can administer.
 
-**1. Build.** The parser output is committed, so this is the whole toolchain:
+**1. Build.**
 
 ```sh
 sudo apt-get install -y libssl-dev
