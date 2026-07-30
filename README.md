@@ -138,12 +138,9 @@ after an unclean exit reaps the containers its predecessor left behind.
   the process GID, and Docker's default is `1 0`. Ping to the emulator's own
   NAT gateway is answered synthetically and still works.
 
-`serve` speaks the Docker Engine API down `/var/run/docker.sock` itself, so
-there is no client library to install and the `docker` binary is never
-executed. The account running it needs to be able to open that socket, which
-usually means the `docker` group. `DOCKER_HOST` overrides the path when it
-names a `unix://` socket; any other form is an error rather than a silent
-fallback.
+`serve` needs read and write on `/var/run/docker.sock`, which usually means the
+`docker` group. `DOCKER_HOST` overrides the path when it names a `unix://`
+socket; any other form is an error rather than a silent fallback.
 
 There is no compose file and no server image.
 
