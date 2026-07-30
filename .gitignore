@@ -17,5 +17,9 @@ _work/
 .vscode/
 compile_commands.json
 
+# Per-machine agent state. The skills under .agents/ are committed.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
 # Golden snapshot for the worker image. Hundreds of MB of CAS chunks.
 worker/saves/
