@@ -270,6 +270,14 @@ Before opening a pull request:
    is the MIPSPro gate and catches GNU extensions that GCC accepts.
 3. If the change touches job execution, run a real workflow against the test
    runner and read the job log in the GitHub UI, not just the runner's stdout.
+4. If the change alters what a workflow can do, update
+   `.agents/skills/irix-workflows/` in the same commit. Adding a `uses:`
+   handler, changing a step's environment, changing an artifact's layout on the
+   wire and adding an expression function all make that skill wrong, and wrong
+   silently: an agent reads it and writes YAML against behaviour that no longer
+   exists. `reference.md` cites a `file:line` per row, so grep it for the file
+   you touched. `README.md` carries the same facts in shorter form under
+   `What works` and `Writing workflows`.
 
 When reporting results, say what you actually observed. If a step was skipped,
 say so. If something is inferred from reading source rather than observed on
