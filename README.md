@@ -9,7 +9,7 @@ binary with IRIX base libraries and a statically linked OpenSSL as its only
 dependencies.
 
 Run it [on the SGI itself](#on-an-sgi), or [on a Linux host](#on-a-linux-host)
-that gives every job its own emulated Indy.
+that runs a pool of emulated Indys in parallel, one per job.
 
 **Contents:**
 - [How a job executes](#how-a-job-executes), and
