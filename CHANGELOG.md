@@ -33,6 +33,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   dispatched to again. A guest that did report writes `complete` into its
   staging directory, and the fallback stands down.
 
+- A worker image that runs a job inside an emulated SGI Indy, published as
+  `ghcr.io/sgidevnet/irix-worker`. `worker/` holds the build; the IRIX disk
+  image is supplied by the operator and is not redistributed here.
+
 ### Fixed
 
 - Connecting treated any `poll` return other than 1 as a failure, so a signal
