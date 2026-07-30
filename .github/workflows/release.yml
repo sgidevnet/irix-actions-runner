@@ -325,7 +325,10 @@ jobs:
 
           # An allowlist, not the exact string the IRIX job asserts: two arches
           # have two loaders, and glibc 2.34 folded libpthread into libc.
+          # The loader is a NEEDED entry on aarch64 and not on x86_64, so both
+          # are listed rather than one being derived from the other.
           allow="libc.so.6 libm.so.6 libssl.so.3 libcrypto.so.3"
+          allow="$allow ld-linux-x86-64.so.2 ld-linux-aarch64.so.1"
           needed=$(readelf -d build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')
           echo "$needed"
           for n in $needed; do
