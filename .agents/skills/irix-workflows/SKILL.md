@@ -114,7 +114,7 @@ Per step: 1536 MB of address space, 4096 MB maximum file size, 512 open files,
 96 processes, no core dumps. Anything a step backgrounds is killed when it
 exits.
 
-## The two run modes differ in one way that matters
+## The workspace
 
 On an SGI the workspace is never wiped, so untracked files survive between jobs
 and `checkout` will not remove them. Run `git clean -xdff` when a clean tree

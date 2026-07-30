@@ -159,10 +159,6 @@ jobs:
 
 Push it and watch the job run on your SGI.
 
-For a real one, see
-[irix-actions-figlet-demo](https://github.com/sgidevnet/irix-actions-figlet-demo):
-it builds figlet from upstream and shows what breaks on IRIX.
-
 ## On a Linux host
 
 You need Docker and a GitHub repository you can administer. `serve` needs read
@@ -236,6 +232,11 @@ unsupported fails with a named error rather than hanging; the handful that pass
 silently are below.
 
 ## Writing workflows
+
+[irix-actions-figlet-demo](https://github.com/sgidevnet/irix-actions-figlet-demo)
+is two working examples. `build.yml` builds figlet from upstream and shows what
+breaks on IRIX; `parallel-hinv.yml` puts ten jobs on ten emulated Indys at once
+and collects what each one reported.
 
 Most workflow YAML works unchanged. `${{ }}` is evaluated in a `run:` body, a
 `with:` value and `if:`.
