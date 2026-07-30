@@ -97,6 +97,20 @@ bash steps run `--noprofile --norc -e -o pipefail`, anything else just `-e`.
 `pipefail` makes SIGPIPE fatal, so `cmd | head -1` and `cmd | grep -m1` fail
 the step when the producer dies. Use `sed -n 1p`.
 
+## Targeting a runner
+
+`runs-on: [self-hosted, irix]` reaches any of them. Every runner carries `irix`,
+`mips` and `mips-n32`; a pool registered with `configure --count` also carries
+`emulated`, and an operator can add more with `configure --labels`.
+
+`runs-on:` is an AND over labels with no negation, so `emulated` pins a job to
+the Docker pool while nothing excludes it. Keeping a job on real hardware needs
+a label those runners carry and the pool does not.
+
+An organisation runner can also be withheld by its runner group, in which case
+it shows Online and the job queues forever. That is an operator setting, not
+something a workflow can express.
+
 ## Identity, timeouts and limits
 
 `RUNNER_OS` is `Linux` and `RUNNER_ARCH` is `X64`. Both are lies: GitHub's
