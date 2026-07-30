@@ -4,7 +4,7 @@ Runs one CI job inside an emulated SGI Indy and exits. This is the guest half
 of the `/job` contract in `src/serve/exec.h`; `runner serve` starts one of
 these per job, and needs `--image` to point at it.
 
-    ghcr.io/sgidevnet/irix-worker:0.4.0-indy
+    ghcr.io/sgidevnet/irix-worker:0.4.3-indy
 
 ## Building
 
@@ -51,6 +51,12 @@ IRIX `tar -h` does not dereference them.
 which adopts it on its own. Without one a verified request returns nothing
 while `curl -k` returns 200, so the failure looks like a broken network rather
 than a missing bundle.
+
+**A second copy of the CA bundle** at `/usr/sgug/etc/pki/tls/certs/ca-bundle.crt`.
+`git()` in `src/exec/handlers.c` neutralises the ambient environment, so no
+variable reaches git and it falls back to that compiled-in path. A full SGUG
+install has the file, the slim guest did not, and `actions/checkout` failed the
+clone with a certificate error while the runner's own HTTPS worked.
 
 **The runner and its job script**, at `/usr/local/runner/`.
 
