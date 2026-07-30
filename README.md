@@ -282,11 +282,6 @@ jobs:
       - run: ./run-tests.sh
 ```
 
-QEMU has no SGI machine model and MAME's Indy emulation does not run 6.5
-usefully. [iris](https://github.com/techomancer/iris) does, and is what the
-Linux mode uses, but it decodes MIPS IV whatever CPU it reports: it will tell
-you a package builds, not that it runs on an R4400.
-
 ## Confinement
 
 Limits are applied in the child between fork and exec.
