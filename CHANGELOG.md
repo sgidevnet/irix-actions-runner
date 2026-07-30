@@ -32,6 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   otherwise leaves that identity online, at `currentParallelism: 1` and never
   dispatched to again. A guest that did report writes `complete` into its
   staging directory, and the fallback stands down.
+- `selftest` reports the Docker daemon's version on a Linux host, and the reason
+  its socket could not be reached when it could not. `serve` does not touch the
+  daemon until a job has been acquired, so a `docker` group problem otherwise
+  surfaces one dispatched and failed job at a time.
 
 - A worker image that runs a job inside an emulated SGI Indy, published as
   `ghcr.io/sgidevnet/irix-worker`. `worker/` holds the build; the IRIX disk

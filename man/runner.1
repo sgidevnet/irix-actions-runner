@@ -227,15 +227,20 @@ and reports the status, the server header, the body size, the clock skew
 against the server's
 .B Date
 header, whether the JSON parses, and whether a second request reuses the
-connection.
+connection. On a Linux host it then reports the Docker daemon's version, or the
+reason its socket could not be reached.
 .PP
-Run it before anything else on an SGI: a wrong clock and an expired CA bundle
+Run it before anything else. On an SGI a wrong clock and an expired CA bundle
 are the two things that break a fresh install, and both produce confusing
-errors later. It checks nothing about Docker, so on a Linux host
-.B selftest OK
-says nothing about whether
+errors later. On a Linux host those two come right from NTP and the distribution
+bundle, and the socket is what decides whether
 .B serve
-will work.
+gets as far as starting a container. Returns 1 when any of it fails.
+.PP
+It says nothing about the worker image.
+.B serve
+pulls an image the daemon does not have, so an absent image is the ordinary
+state on a fresh host.
 .SS version
 Prints this runner's version and the protocol version it reports to the
 service. Also

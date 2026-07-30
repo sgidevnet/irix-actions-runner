@@ -415,6 +415,39 @@ pull_image(const char *image, char *err, size_t errlen)
 }
 
 int
+sgug_docker_ping(char *version, size_t verlen, char *err, size_t errlen)
+{
+	sgug_json_doc *doc = NULL;
+	struct buf resp;
+	const sgug_json *ver;
+	int status, rc = -1;
+
+	memset(&resp, 0, sizeof(resp));
+
+	if (request("GET", "/version", NULL, &status, &resp, err, errlen) != 0)
+		goto out;
+	if (status != 200) {
+		fail_status("version", status, &resp, err, errlen);
+		goto out;
+	}
+
+	doc = sgug_json_parse(resp.p, resp.len, err, errlen);
+	if (doc == NULL)
+		goto out;
+	ver = sgug_json_get(sgug_json_root(doc), "Version");
+	sgug_snprintf(version, verlen, "%s", sgug_json_string(ver, ""));
+	if (version[0] == '\0') {
+		sgug_snprintf(err, errlen, "version returned no Version");
+		goto out;
+	}
+	rc = 0;
+out:
+	sgug_json_free(doc);
+	free(resp.p);
+	return rc;
+}
+
+int
 sgug_docker_run(const char *image, const char *bind, const char *const *env,
     size_t nenv, const sgug_docker_label *labels, size_t nlabel, char *id,
     size_t idlen, char *err, size_t errlen)
