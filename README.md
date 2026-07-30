@@ -128,11 +128,11 @@ after an unclean exit reaps the containers its predecessor left behind.
 
 ### What is different under Docker
 
-- **This is not a portability gate.** iris decodes MIPS IV whatever CPU it
-  reports, so a build can pass here and fault on real hardware.
-- **Every job starts clean**, which inverts the workspace caveat below.
-  `actions/checkout` re-clones on every job and nothing incremental survives.
-- **Budget 583 MiB and about one core per job.**
+- **iris decodes MIPS IV** whatever CPU it reports, so a build can pass here and
+  fault on real hardware.
+- **Each job gets a fresh container.** Nothing survives between jobs, and
+  `actions/checkout` re-clones every time.
+- **583 MiB and about one core per job.**
 - **Outbound ping does not work** in a default container. iris opens an
   unprivileged ICMP socket, which needs `net.ipv4.ping_group_range` to cover
   the process GID, and Docker's default is `1 0`. Ping to the emulator's own
