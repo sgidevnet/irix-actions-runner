@@ -16,3 +16,6 @@ _work/
 .idea/
 .vscode/
 compile_commands.json
+
+# Golden snapshot for the worker image. Hundreds of MB of CAS chunks.
+worker/saves/
