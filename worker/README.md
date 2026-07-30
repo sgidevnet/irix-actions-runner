@@ -4,7 +4,7 @@ Runs one CI job inside an emulated SGI Indy and exits. This is the guest half
 of the `/job` contract in `src/serve/exec.h`; `runner serve` starts one of
 these per job, and needs `--image` to point at it.
 
-    ghcr.io/sgidevnet/irix-worker:0.3.0-indy
+    ghcr.io/sgidevnet/irix-worker:0.4.0-indy
 
 ## Building
 
@@ -56,9 +56,10 @@ than a missing bundle.
 
 ## Why it restores instead of cold booting
 
-Measured on one host, same image and same job message: cold boot 251.96 s,
-restore 15.77 s, with byte-identical job logs. `restore` itself is under 1.2 s;
-most of what remains is a 5.8 s NFS mount.
+Measured on one host, same image and same job message: cold boot 246.60 s
+against 13.92 s mean over 12 restore trials, range 13.08 to 14.55. That is 17.7x,
+or 233 s saved per job. `restore` itself is about 1 s; most of what remains is
+the NFS mount.
 
 This needs `sgidevnet/iris` v0.1.0-sgidevnet.2 or later, which carries the L1D
 tag fix while `techomancer/iris` #63 to #66 are in review. Before that fix,
