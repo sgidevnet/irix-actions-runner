@@ -6,17 +6,19 @@ name: release
 # agree across the tag, SGUG_PROJECT_VERSION in src/version.h, and a CHANGELOG
 # section, or the run fails before it touches the slow machine.
 #
-# Two constraints shape every step in the `build` job, both from this runner:
+# Two constraints shape every step in `build-irix`, both from this runner, and
+# neither applies to `build-linux`:
 #
 #   1. There is no expression evaluator, so `${{ }}` is unusable there. In a
 #      `run:` body it is now a hard error; in a `with:` value it silently reads
-#      as absent. Use the $GITHUB_* shell variables instead.
+#      as absent. Use the $GITHUB_* shell variables instead. `build-linux` is on
+#      hosted runners and reads `${{ matrix.* }}` normally.
 #   2. No GITHUB_TOKEN reaches steps, so IRIX cannot call the REST API. The
 #      release itself is created from a hosted runner.
 #
-# Re-running only the failed `build` job hits a 409 on artifact upload, because
-# artifact names must be unique per workflow run and the previous attempt's is
-# still there. Re-run the whole workflow instead.
+# Re-running one failed build job hits a 409 on artifact upload, because artifact
+# names must be unique per workflow run and the previous attempt's is still
+# there. Re-run the whole workflow instead.
 
 on:
   push:
@@ -37,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Version agrees across tag, header and changelog
+      - name: Version agrees across tag, header, changelog and manpage
         run: |
           set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
@@ -55,6 +57,10 @@ jobs:
           if ! grep -q "^## \[$ver\]" CHANGELOG.md; then
             echo "CHANGELOG.md has no '## [$ver]' section"; exit 1
           fi
+          man=$(sed -n 's/^\.TH RUNNER 1 .*"irix-actions-runner \([^"]*\)".*/\1/p' man/runner.1)
+          if [ "$man" != "$ver" ]; then
+            echo "tag says $ver, man/runner.1 says $man"; exit 1
+          fi
           echo "version $ver agrees"
 
       - name: CA bundle is present and plausible
@@ -64,7 +70,7 @@ jobs:
           echo "contrib/cacert.pem carries $n certificates"
           if [ "$n" -lt 100 ]; then echo "bundle looks truncated"; exit 1; fi
 
-  build:
+  build-irix:
     needs: preflight
     runs-on: [self-hosted, irix]
     timeout-minutes: 180
@@ -240,8 +246,180 @@ jobs:
           name: irix-dist
           path: dist
 
+  # Native on both arches rather than cross-compiled, because a cross-built
+  # binary cannot run `make test` and would ship having never executed. The
+  # arm64 label is only ever version-pinned, so x86_64 is pinned to match and
+  # the glibc floor moves only when this file does.
+  build-linux:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04,     arch: x86_64, elf: x86-64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64,  elf: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          if [ ! -f /usr/include/openssl/ssl.h ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends libssl-dev
+          fi
+          uname -srm
+          cc --version | sed -n 1p
+          openssl version
+          ldd --version | sed -n 1p
+
+      - name: Version agrees with the checked-out tree
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          hdr=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*"\(.*\)".*/\1/p' src/version.h)
+          if [ "$hdr" != "$ver" ]; then
+            echo "tag says $ver, src/version.h says $hdr"; exit 1
+          fi
+          man=$(sed -n 's/^\.TH RUNNER 1 .*"irix-actions-runner \([^"]*\)".*/\1/p' man/runner.1)
+          if [ "$man" != "$ver" ]; then
+            echo "tag says $ver, man/runner.1 says $man"; exit 1
+          fi
+          echo "building $ver from $GITHUB_SHA"
+
+      # The %z grep. The MIPSPro half skips itself off IRIX.
+      - name: Portability gate
+        run: |
+          set -euo pipefail
+          make clean
+          make check
+
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" test
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)"
+          ls -l build/runner
+
+      - name: The binary is what this matrix entry claims
+        run: |
+          set -euo pipefail
+          desc=$(file build/runner)
+          echo "$desc"
+          # Catches a matrix entry that landed on the wrong runner, which
+          # otherwise ships an x86_64 binary named arm64.
+          case "$desc" in *"ELF 64-bit LSB"*) ;; *) echo "not a 64-bit LSB ELF"; exit 1 ;; esac
+          case "$desc" in
+            *${{ matrix.elf }}*) ;;
+            *) echo "expected ${{ matrix.elf }}"; exit 1 ;;
+          esac
+
+          # An allowlist, not the exact string the IRIX job asserts: two arches
+          # have two loaders, and glibc 2.34 folded libpthread into libc.
+          allow="libc.so.6 libm.so.6 libssl.so.3 libcrypto.so.3"
+          needed=$(readelf -d build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')
+          echo "$needed"
+          for n in $needed; do
+            case " $allow " in
+              *" $n "*) ;;
+              *) echo "unexpected dependency: $n"; exit 1 ;;
+            esac
+          done
+          # The inverse of the IRIX gate: OpenSSL is linked statically there and
+          # dynamically here, so its absence would mean something went wrong.
+          for want in libssl.so.3 libcrypto.so.3; do
+            case " $needed " in
+              *" $want "*) ;;
+              *) echo "expected a dynamic $want"; exit 1 ;;
+            esac
+          done
+
+          echo "--- clean environment ---"
+          env -i ./build/runner version
+          ver="${GITHUB_REF_NAME#v}"
+          if [ "$(env -i ./build/runner version | sed -n 1p)" != "irix-actions-runner $ver" ]; then
+            echo "the built binary does not report $ver"; exit 1
+          fi
+
+      - name: TLS works against the system trust store
+        run: |
+          set -euo pipefail
+          # No cert.pem ships on Linux, so this proves the compiled-in path at
+          # src/net/tls.c:18 resolves. The negative control is what stops the
+          # gate passing forever if that lookup is ever ignored.
+          if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
+            echo "selftest passed with a nonexistent bundle; this gate proves nothing"
+            exit 1
+          fi
+          echo "negative control ok"
+
+          i=1
+          while [ "$i" -le 3 ]; do
+            if ./build/runner selftest; then break; fi
+            if [ "$i" -eq 3 ]; then echo "selftest failed three times"; exit 1; fi
+            sleep 20
+            i=$((i + 1))
+          done
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          name="irix-actions-runner-$ver-linux-${{ matrix.arch }}"
+          rm -rf dist "$name"
+          mkdir -p "$name" dist
+
+          # No cert.pem: every Linux distribution maintains its own trust store,
+          # and a bundle beside the binary would silently override it with a
+          # snapshot frozen at release time.
+          cp build/runner "$name/runner"
+          cp README.md LICENSE CHANGELOG.md "$name/"
+          cp man/runner.1 "$name/runner.1"
+          strip "$name/runner"
+          chmod 0755 "$name/runner"
+          chmod 0644 "$name/README.md" "$name/LICENSE" \
+              "$name/CHANGELOG.md" "$name/runner.1"
+
+          (cd "$name" && env -i ./runner version)
+
+          {
+            echo "project    $ver"
+            echo "commit     $GITHUB_SHA"
+            echo "tag        $GITHUB_REF_NAME"
+            echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "built on   $(uname -srm)"
+            echo "compiler   $(cc --version | sed -n 1p)"
+            echo "openssl    $(openssl version)"
+            echo "glibc      $(ldd --version | sed -n 1p)"
+            echo "object     $(file "$name/runner")"
+            echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"
+          } > "$name/BUILD-INFO"
+          chmod 0644 "$name/BUILD-INFO"
+          cat "$name/BUILD-INFO"
+
+          tar --format=ustar --owner=0 --group=0 --numeric-owner --sort=name \
+              --mtime="@$(git log -1 --format=%ct)" -cf "dist/$name.tar" "$name"
+          gzip -9n "dist/$name.tar"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          cat "dist/$name.tar.gz.sha256"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist-${{ matrix.arch }}
+          path: dist
+
   publish:
-    needs: build
+    needs: [build-irix, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -250,20 +428,33 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: irix-dist
+          pattern: '*-dist*'
           path: dl
 
-      - name: Verify what came off the build machine
+      - name: Verify what came off the build machines
         run: |
           set -euo pipefail
-          tar=$(find dl -name '*.tar.gz' -print -quit)
-          test -n "$tar"
-          (cd "$(dirname "$tar")" && sha256sum -c "$(basename "$tar").sha256")
-          tar -tvzf "$tar"
-          if ! tar -tvzf "$tar" | grep -Eq '^-rwxr-xr-x .*/runner$'; then
-            echo "the executable bit did not survive packaging"; exit 1
+          n=0
+          for t in dl/*/*.tar.gz; do
+            echo "--- $t"
+            (cd "$(dirname "$t")" && sha256sum -c "$(basename "$t").sha256")
+            # Listed to a file and grepped there, not piped. `grep -q` exits on
+            # its first match, and under `pipefail` the SIGPIPE that gives the
+            # producer fails the step. That is a race on how much tar has
+            # written, so it looks like a flake rather than a bug.
+            tar -tvzf "$t" > listing
+            cat listing
+            if ! grep -Eq '^-rwxr-xr-x .*/runner$' listing; then
+              echo "the executable bit did not survive packaging"; exit 1
+            fi
+            n=$((n + 1))
+          done
+          # Counted, because the loop is silent about an artifact that never
+          # arrived. An earlier revision took only the first match and would
+          # have published one tarball out of three without saying so.
+          if [ "$n" -ne 3 ]; then
+            echo "expected 3 tarballs, found $n"; exit 1
           fi
-          echo "TARBALL=$tar" >> "$GITHUB_ENV"
 
       - name: Release notes
         run: |
@@ -278,19 +469,25 @@ jobs:
             echo "no CHANGELOG content for $ver"; exit 1
           fi
           cat > notes.md <<'PREAMBLE'
-          Native GitHub Actions runner for SGI IRIX 6.5.22 and later, MIPS n32.
+          Native GitHub Actions runner for SGI IRIX, and for the Linux hosts
+          that dispatch jobs to emulated Indys.
 
-          Requires IRIX 6.5.22+ on an R4000 or later CPU. The binary needs only
-          `libc.so.1`, `libpthread.so` and `libm.so`, all IRIX base. `cert.pem`
-          ships alongside it and is found automatically; no SGUG-RSE needed to
-          run. `git`, `zip` and `unzip` are needed only for `uses:` steps.
-
-          Stock IRIX `tar` cannot decompress, so extract with:
+          **IRIX 6.5.22 and later**, MIPS n32, on an R4000 or later CPU. The
+          binary needs only `libc.so.1`, `libpthread.so` and `libm.so`, all
+          IRIX base. `cert.pem` ships alongside it and is found automatically;
+          no SGUG-RSE needed to run. `git`, `zip` and `unzip` are needed only
+          for `uses:` steps. Stock IRIX `tar` cannot decompress, so extract
+          with:
 
               gzip -dc irix-actions-runner-*.tar.gz | tar xvf -
 
+          **Linux x86_64 and arm64**, built on Ubuntu 24.04, so glibc 2.39 is
+          the floor and the host supplies OpenSSL 3. No `cert.pem` ships: every
+          distribution maintains its own trust store, and `SSL_CERT_FILE`
+          overrides it. Docker is needed for `runner serve`.
+
           Built and tested on IRIX 6.5.30m. Earlier 6.5.x releases and other SGI
-          models are expected to work and are untested. See `BUILD-INFO` in the
+          models are expected to work and are untested. See `BUILD-INFO` in each
           tarball for exactly what was built and on what.
 
           If the first connection fails, run `./runner selftest`: an undisciplined
@@ -308,13 +505,28 @@ jobs:
           tag="$GITHUB_REF_NAME"
           pre=""
           case "${tag#v}" in *-*) pre="--prerelease" ;; esac
+
+          # gh takes an asset as path#label, and the label is what the download
+          # page shows. An unrecognised name is an error rather than an unlabelled
+          # asset, so a new platform cannot ship anonymously.
+          assets=()
+          plain=()
+          for t in dl/*/*.tar.gz; do
+            case "$t" in
+              *irix6.5-mips-n32*) label="IRIX 6.5 MIPS n32" ;;
+              *linux-x86_64*)     label="Linux x86_64" ;;
+              *linux-arm64*)      label="Linux arm64" ;;
+              *) echo "no label for $t"; exit 1 ;;
+            esac
+            assets+=("$t#$label tarball" "$t.sha256#$label SHA-256")
+            plain+=("$t" "$t.sha256")
+          done
+
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$TARBALL" "$TARBALL.sha256" --clobber
+            gh release upload "$tag" "${plain[@]}" --clobber
             gh release edit "$tag" --notes-file notes.md
           else
             gh release create "$tag" --verify-tag --draft $pre \
-              --title "$tag" --notes-file notes.md \
-              "$TARBALL#IRIX 6.5 MIPS n32 tarball" \
-              "$TARBALL.sha256#SHA-256"
+              --title "$tag" --notes-file notes.md "${assets[@]}"
           fi
           gh release view "$tag" --json isDraft,assets

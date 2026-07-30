@@ -1,0 +1,170 @@
+name: scratch linux
+
+# Temporary. Proves the build-linux matrix on both hosted arches without
+# cutting a tag. Delete before merging.
+
+on: [workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04,     arch: x86_64, elf: x86-64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64,  elf: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          if [ ! -f /usr/include/openssl/ssl.h ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends libssl-dev
+          fi
+          uname -srm
+          cc --version | sed -n 1p
+          openssl version
+          ldd --version | sed -n 1p
+
+      - name: Version agrees with the checked-out tree
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*"\(.*\)".*/\1/p' src/version.h)
+          echo "VER=$ver" >> "$GITHUB_ENV"
+          echo "building $ver from $GITHUB_SHA"
+
+      # The %z grep. The MIPSPro half skips itself off IRIX.
+      - name: Portability gate
+        run: |
+          set -euo pipefail
+          make clean
+          make check
+
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" test
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)"
+          ls -l build/runner
+
+      - name: The binary is what this matrix entry claims
+        run: |
+          set -euo pipefail
+          desc=$(file build/runner)
+          echo "$desc"
+          # Catches a matrix entry that landed on the wrong runner, which
+          # otherwise ships an x86_64 binary named arm64.
+          case "$desc" in *"ELF 64-bit LSB"*) ;; *) echo "not a 64-bit LSB ELF"; exit 1 ;; esac
+          case "$desc" in
+            *${{ matrix.elf }}*) ;;
+            *) echo "expected ${{ matrix.elf }}"; exit 1 ;;
+          esac
+
+          # An allowlist, not the exact string the IRIX job asserts: two arches
+          # have two loaders, and glibc 2.34 folded libpthread into libc.
+          allow="libc.so.6 libm.so.6 libssl.so.3 libcrypto.so.3"
+          needed=$(readelf -d build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')
+          echo "$needed"
+          for n in $needed; do
+            case " $allow " in
+              *" $n "*) ;;
+              *) echo "unexpected dependency: $n"; exit 1 ;;
+            esac
+          done
+          # The inverse of the IRIX gate: OpenSSL is linked statically there and
+          # dynamically here, so its absence would mean something went wrong.
+          for want in libssl.so.3 libcrypto.so.3; do
+            case " $needed " in
+              *" $want "*) ;;
+              *) echo "expected a dynamic $want"; exit 1 ;;
+            esac
+          done
+
+          echo "--- clean environment ---"
+          env -i ./build/runner version
+          ver="$VER"
+          if [ "$(env -i ./build/runner version | sed -n 1p)" != "irix-actions-runner $ver" ]; then
+            echo "the built binary does not report $ver"; exit 1
+          fi
+
+      - name: TLS works against the system trust store
+        run: |
+          set -euo pipefail
+          # No cert.pem ships on Linux, so this proves the compiled-in path at
+          # src/net/tls.c:18 resolves. The negative control is what stops the
+          # gate passing forever if that lookup is ever ignored.
+          if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
+            echo "selftest passed with a nonexistent bundle; this gate proves nothing"
+            exit 1
+          fi
+          echo "negative control ok"
+
+          i=1
+          while [ "$i" -le 3 ]; do
+            if ./build/runner selftest; then break; fi
+            if [ "$i" -eq 3 ]; then echo "selftest failed three times"; exit 1; fi
+            sleep 20
+            i=$((i + 1))
+          done
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          ver="$VER"
+          name="irix-actions-runner-$ver-linux-${{ matrix.arch }}"
+          rm -rf dist "$name"
+          mkdir -p "$name" dist
+
+          # No cert.pem: every Linux distribution maintains its own trust store,
+          # and a bundle beside the binary would silently override it with a
+          # snapshot frozen at release time.
+          cp build/runner "$name/runner"
+          cp README.md LICENSE CHANGELOG.md "$name/"
+          cp man/runner.1 "$name/runner.1"
+          strip "$name/runner"
+          chmod 0755 "$name/runner"
+          chmod 0644 "$name/README.md" "$name/LICENSE" \
+              "$name/CHANGELOG.md" "$name/runner.1"
+
+          (cd "$name" && env -i ./runner version)
+
+          {
+            echo "project    $ver"
+            echo "commit     $GITHUB_SHA"
+            echo "tag        $GITHUB_REF_NAME"
+            echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "built on   $(uname -srm)"
+            echo "compiler   $(cc --version | sed -n 1p)"
+            echo "openssl    $(openssl version)"
+            echo "glibc      $(ldd --version | sed -n 1p)"
+            echo "object     $(file "$name/runner")"
+            echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"
+          } > "$name/BUILD-INFO"
+          chmod 0644 "$name/BUILD-INFO"
+          cat "$name/BUILD-INFO"
+
+          tar --format=ustar --owner=0 --group=0 --numeric-owner --sort=name \
+              --mtime="@$(git log -1 --format=%ct)" -cf "dist/$name.tar" "$name"
+          gzip -9n "dist/$name.tar"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          cat "dist/$name.tar.gz.sha256"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist-${{ matrix.arch }}
+          path: dist
