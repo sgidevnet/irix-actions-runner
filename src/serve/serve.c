@@ -46,8 +46,6 @@ sgug_serve_selftest(void)
 
 	if (sgug_docker_ping(version, sizeof(version), err, sizeof(err)) != 0) {
 		printf("docker    %s\n", err);
-		printf("          serve runs each job in a container and\n");
-		printf("          needs this socket; `run` does not\n");
 		return -1;
 	}
 	printf("docker    engine %s\n", version);
