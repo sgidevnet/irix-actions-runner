@@ -53,10 +53,11 @@ jobs:
           make clean
           make check
 
-      - name: Unit tests
-        run: |
-          set -eu
-          make -j2 test
+      # No `make test` here. It panics the guest with `Fatal error on root
+      # filesystem`: an emulated Indy's SCSI write path does not survive
+      # building and running eleven test binaries, and the kernel takes the
+      # container with it. The tests run on Linux in ci.yml on every pull
+      # request, and on an SGI when one is available.
 
       - name: Build
         run: |
