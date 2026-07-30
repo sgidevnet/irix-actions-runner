@@ -124,15 +124,18 @@ jobs:
           make clean
           make check
 
+      # -j1, not -j2: the guest is a 256 MB Indy and `execjob` is resident
+      # alongside the compiler. Two gcc processes plus the runner is what killed
+      # the job, and it dies without reporting, so the step reads as blank.
       - name: Unit tests
         run: |
           set -eu
-          make -j2 test
+          make test
 
       - name: Build
         run: |
           set -eu
-          make -j2
+          make
           ls -l build/runner
 
       - name: The binary is portable to any IRIX 6.5 machine
