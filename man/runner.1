@@ -1,0 +1,373 @@
+.TH RUNNER 1 "2026-07-30" "irix-actions-runner 0.3.0" "User Commands"
+.SH NAME
+runner \- GitHub Actions self-hosted runner for SGI IRIX
+.SH SYNOPSIS
+.B runner configure
+.B \-\-url
+.I URL
+.B \-\-token
+.I TOKEN
+.RI [ options ]
+.br
+.B runner run
+.RI [ \-\-dir
+.IR DIR ]
+.RI [ \-\-verbose | \-\-trace ]
+.br
+.B runner serve
+.RI [ \-\-count
+.I N
+.B \-\-name\-prefix
+.IR P ]
+.RI [ options ]
+.br
+.B runner execjob
+.B \-\-message
+.I FILE
+.B \-\-name
+.I NAME
+.B \-\-work
+.I DIR
+.RI [ options ]
+.br
+.B runner remove
+.B \-\-token
+.I TOKEN
+.RI [ \-\-count
+.I N
+.B \-\-name\-prefix
+.IR P ]
+.br
+.B runner status
+.RI [ \-\-dir
+.IR DIR ]
+.br
+.B runner selftest
+.RI [ host ]
+.br
+.B runner version
+.br
+.B runner help
+.SH DESCRIPTION
+A clean-room reimplementation of the GitHub Actions runner wire protocol in
+C99, for IRIX 6.5.22 and later. The official runner is .NET and cannot run
+there.
+.PP
+The runtime is split client/server, and one binary is both halves. The server
+holds the registration and long-polls GitHub for work. The client is the job
+runtime: it takes one job as a message file, runs the steps and reports.
+.PP
+.B run
+is both halves in one process and is what an SGI uses.
+.B serve
+is the server alone, for a pool of registered identities on a Linux host, and
+hands each job it acquires to a container.
+.B execjob
+is the client alone, needs no registration, and reads the job message from a
+file.
+.SH COMMANDS
+.SS configure
+Registers with GitHub and writes the runner state. Run once. Generates a
+2048\-bit RSA key and sends the public half; the registration token is not
+needed again, because every identity authenticates with that key from then on.
+.TP
+.BI \-\-url " URL"
+.I https://github.com/ORG
+or
+.IR https://github.com/ORG/REPO .
+Required.
+.TP
+.BI \-\-token " TOKEN"
+A registration token, from the repository or organisation Settings page, or
+from
+.IR /repos/OWNER/REPO/actions/runners/registration-token .
+They expire in one hour. Required.
+.TP
+.BI \-\-name " NAME"
+Runner name. Defaults to the hostname, or
+.I irix\-runner
+when
+.BR gethostname (3)
+fails. Excluded by
+.BR \-\-count .
+.TP
+.BI \-\-runnergroup " NAME"
+Runner group, default
+.IR Default .
+See
+.B NOTES
+below: a wrong group is silent.
+.TP
+.BI \-\-labels " A,B,C"
+Extra labels beyond the
+.IR irix ", " mips " and " mips\-n32
+every runner carries. At most 32 labels in total.
+.TP
+.BI \-\-work " DIR"
+Work folder, default
+.IR _work .
+Excluded by
+.BR \-\-count ,
+which gives every identity its own.
+.TP
+.B \-\-replace
+Take over an existing runner of this name. Without it, an existing
+.I .runner
+in the target directory is refused.
+.TP
+.BI \-\-count " N"
+Register
+.I N
+identities rather than one, 1 to 64. Creates
+.IR P\-0 " through " P\-(N\-1)
+under the current directory, each named after its own directory, and adds an
+.I emulated
+label. Requires
+.BR \-\-name\-prefix ,
+and excludes
+.BR \-\-name " and " \-\-work .
+.TP
+.BI \-\-name\-prefix " P"
+The prefix for
+.BR \-\-count .
+Names both the directory and the runner. At most 112 bytes.
+.SS run
+Listens for jobs and executes them in this process. This is what makes the
+runner show Online. Runs on IRIX and on Linux.
+.TP
+.BI \-\-dir " DIR"
+Runner directory, default the current one.
+.TP
+.BR \-\-verbose ", " \-\-trace
+Protocol logging, increasing.
+.SS serve
+One listener per identity, each job in its own container. Linux only; on IRIX
+it prints a message and returns 2.
+.PP
+Forks one child per identity, all before any network use, because the HTTP
+client caches one keep\-alive TLS connection per host and sharing it across
+children corrupts the stream. Every directory is checked before any fork, so a
+missing one aborts the whole command.
+.PP
+.BR SIGTERM " or " SIGINT
+is forwarded to every child exactly once, and the parent then waits for all of
+them, so no identity is left holding a pool session. A
+.B serve
+that starts after an unclean exit reaps the containers its predecessor left
+behind, identified by a
+.I sgug.runner.supervisor
+label naming a pid that no longer exists.
+.TP
+.BI \-\-count " N"
+Serve
+.I N
+identities, 1 to 64. Goes with
+.BR \-\-name\-prefix .
+.TP
+.BI \-\-name\-prefix " P"
+Directories
+.IR P\-0 ", " P\-1 ", ..."
+.TP
+.BI \-\-image " NAME"
+Worker image, default
+.IR irix\-worker:latest .
+An image the daemon does not have is pulled once and the create retried.
+.TP
+.BI \-\-job\-timeout " SECS"
+Wall clock per job, 1 to 86400, default 14400. Measured with
+.B CLOCK_MONOTONIC
+from the moment the container starts. On expiry the container is killed and the
+job is reported failed from the host. Host\-side only: it is never propagated
+into the container.
+.TP
+.BR \-\-verbose ", " \-\-trace
+Protocol logging, increasing.
+.SS execjob
+Runs one job from a message file and reports it. Needs no configuration,
+because the message carries the credentials it reports with. This is what runs
+inside the worker container.
+.TP
+.BI \-\-message " FILE"
+The job message as received. Required.
+.TP
+.BI \-\-name " NAME"
+The runner name the job sees. Required.
+.TP
+.BI \-\-work " DIR"
+Work folder. Must be absolute, and under 128 bytes. Required.
+.TP
+.BI \-\-cancel\-file " PATH"
+Abort when this file's mtime changes. The file must already exist. Polled every
+5 seconds by a
+.B SIGALRM
+handler.
+.SS remove
+Deregisters and deletes the local configuration. Takes the same
+.BR \-\-count " and " \-\-name\-prefix
+as
+.BR configure ,
+and a fresh
+.BR \-\-token .
+Unlike
+.BR configure ,
+it continues past a failure and returns 1 at the end, so one unreachable
+identity does not strand the rest.
+.SS status
+Prints the configured runner: name, URL, group and pool id, agent id, tenant,
+whether the v2 broker flow is in use, the JWT signing algorithm and the work
+folder. Takes
+.BI \-\-dir " DIR" .
+Returns 1 when nothing is configured there.
+.SS selftest
+Opens an HTTPS connection to
+.I host
+(default
+.IR api.github.com )
+and reports the status, the server header, the body size, the clock skew
+against the server's
+.B Date
+header, whether the JSON parses, and whether a second request reuses the
+connection.
+.PP
+Run it before anything else on an SGI: a wrong clock and an expired CA bundle
+are the two things that break a fresh install, and both produce confusing
+errors later. It checks nothing about Docker, so on a Linux host
+.B selftest OK
+says nothing about whether
+.B serve
+will work.
+.SS version
+Prints this runner's version and the protocol version it reports to the
+service. Also
+.BR \-\-version " and " \-V .
+.SS help
+Prints the usage summary. Also
+.BR \-\-help " and " \-h .
+.SH LABELS
+Every runner carries
+.IR irix ", " mips " and " mips\-n32 ,
+plus the system labels
+.IR self\-hosted ", " Linux " and " X64 .
+The last two are untrue and deliberate: GitHub's system label vocabulary has no
+IRIX or MIPS value, and a runner describing itself accurately would match no
+.IR runs\-on .
+.PP
+.B configure \-\-count
+adds
+.IR emulated ,
+so
+.I runs\-on: [self\-hosted, irix, emulated]
+pins a job to a container pool.
+.I runs\-on
+is an AND over labels with no negation, so nothing excludes that pool; keeping
+work on real hardware needs a label of its own from
+.BR \-\-labels .
+.SH FILES
+.TP
+.I .runner
+Agent id, name, pool and server URLs. Mode 0644.
+.TP
+.I .credentials
+OAuth client id and token endpoint. Mode 0600.
+.TP
+.I .rsakey
+The private key, PKCS#1 PEM. Mode 0600. A warning is printed if the mode is
+anything else.
+.TP
+.I cert.pem
+Trust roots. Adopted automatically when it sits beside the binary.
+.PP
+Under
+.B \-\-count
+there is one set of the first three per identity directory.
+.SH ENVIRONMENT
+.TP
+.B SGUG_RUNNER_OS
+The OS the runner claims. Default
+.IR Linux ,
+see
+.BR LABELS .
+Reaches the acquirejob request, the message poll query and the
+.B RUNNER_OS
+variable given to steps.
+.TP
+.B SSL_CERT_FILE
+Trust roots. Set automatically from a
+.I cert.pem
+beside the binary when unset. SGUG\-RSE's own bundle at
+.I /usr/sgug/etc/pki/tls/cert.pem
+is used when neither is present.
+.TP
+.B DOCKER_HOST
+Overrides
+.IR /var/run/docker.sock .
+Only a
+.I unix://
+path is accepted; any other form is an error rather than a silent fallback.
+.B serve
+only.
+.TP
+.B TMPDIR
+Where
+.B serve
+creates each job's staging directory, mode 0700. Defaults to
+.IR /tmp .
+.TP
+.B SGUG_DUMP_MESSAGES
+Prints every message body received. Job messages carry access tokens and every
+secret the workflow references, so this belongs in a debugging session and
+nowhere else.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+The command ran and failed.
+.TP
+.B 2
+Usage error, an unknown command, or
+.B serve
+on IRIX.
+.SH EXAMPLES
+Register one runner against a repository and start it:
+.PP
+.RS
+.nf
+runner configure \-\-url https://github.com/OWNER/REPO \-\-token TOK
+runner run
+.fi
+.RE
+.PP
+Register four identities against an organisation, in a group that has access to
+the repositories whose workflows are queued, and serve them:
+.PP
+.RS
+.nf
+runner configure \-\-url https://github.com/ORG \-\-token TOK \\
+    \-\-count 4 \-\-name\-prefix irix \-\-runnergroup IRIX
+runner serve \-\-count 4 \-\-name\-prefix irix \\
+    \-\-image ghcr.io/sgidevnet/irix\-worker:0.4.3\-indy
+.fi
+.RE
+.SH NOTES
+A wrong
+.B \-\-runnergroup
+is quiet. The runner registers, shows Online, and is never dispatched to,
+because the group it landed in has no access to the repository whose workflow
+is queued. The group's repository access is under the organisation's Actions
+settings.
+.PP
+Nothing renews a job lock. A job that is acquired and never completed leaves
+that identity online at
+.I currentParallelism 1
+and never dispatched to again.
+.SH SEE ALSO
+.BR docker (1),
+.BR gh (1)
+.PP
+.I https://github.com/sgidevnet/irix\-actions\-runner
+.PP
+.I docs/protocol.md
+in the source tree records where github.com diverges from its own published
+documentation.
