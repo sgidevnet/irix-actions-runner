@@ -12,7 +12,7 @@ These must sit beside the Dockerfile. None is in this repository:
 
 | file | what it is |
 |---|---|
-| `iris`, `iris-ci` | from [`sgidevnet/iris` v0.1.0-sgidevnet.1](https://github.com/sgidevnet/iris/releases/tag/v0.1.0-sgidevnet.1), or built from that tag with `--release --features chd,lightning,rex-jit` |
+| `iris`, `iris-ci` | from [`sgidevnet/iris` v0.1.0-sgidevnet.2](https://github.com/sgidevnet/iris/releases/tag/v0.1.0-sgidevnet.2), or built from that tag with `--release --features chd,lightning,rex-jit` |
 | `nvram.bin` | PROM settings, carrying the MAC address and `console=d` |
 | `indy.chd` | an IRIX 6.5 Indy disk image, supplied by the operator |
 | `indy.chd.diff.chd` | the guest customisations below |
@@ -60,10 +60,10 @@ Measured on one host, same image and same job message: cold boot 251.96 s,
 restore 15.77 s, with byte-identical job logs. `restore` itself is under 1.2 s;
 most of what remains is a 5.8 s NFS mount.
 
-This needs `sgidevnet/iris` v0.1.0-sgidevnet.1 or later, which carries the L1D
-tag fix while `techomancer/iris#61` is in review. Before that fix, restoring a
-booted guest panicked every time, 6 attempts out of 6 on the binaries in the
-published `0.3.0-indy` image, with a page-cache panic:
+This needs `sgidevnet/iris` v0.1.0-sgidevnet.2 or later, which carries the L1D
+tag fix while `techomancer/iris` #63 to #66 are in review. Before that fix,
+restoring a booted guest panicked every time, 6 attempts out of 6 on the
+binaries in the published `0.3.0-indy` image, with a page-cache panic:
 
 ```
 PANIC: pcache_remove_pfdat couldn't find pfd 0x884198a0, pcache 0x92bbfdf0, ...
