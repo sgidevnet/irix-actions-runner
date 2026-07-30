@@ -67,17 +67,18 @@ job message carries the credentials it reports with.
 
 | | |
 |---|---|
-| OS | IRIX 6.5.22 or later, or any Linux with Docker |
-| CPU | MIPS R4000 or later. The binary is n32, MIPS III |
+| On an SGI | IRIX 6.5.22 or later, on an R4000 or later CPU. The binary is n32, MIPS III |
+| On a Linux host | x86_64 or arm64, glibc 2.39 or newer, OpenSSL 3, and Docker |
 | `run:` steps | nothing beyond base IRIX |
-| `uses:` steps | `git` 2.18+, `zip` and `unzip` |
+| `uses:` steps | `git` 2.18+, `zip` and `unzip`, inside the guest |
 
 Built and tested on IRIX 6.5.30m. Earlier 6.5.x releases are expected to work
-and are untested.
+and are untested. The Linux binaries are built on Ubuntu 24.04.
 
-The tarball carries `cert.pem`, found automatically when it sits next to the
-binary. `SSL_CERT_FILE` overrides it, and SGUG-RSE's own bundle at
-`/usr/sgug/etc/pki/tls/cert.pem` is used when neither is present.
+The IRIX tarball carries `cert.pem`, found automatically when it sits next to
+the binary. `SSL_CERT_FILE` overrides it, and SGUG-RSE's own bundle at
+`/usr/sgug/etc/pki/tls/cert.pem` is used when neither is present. The Linux
+tarballs carry no bundle, because the distribution maintains one already.
 
 Configuration is written beside the binary as `.runner`, `.credentials` and
 `.rsakey`, or one set per identity directory under `--count`.
