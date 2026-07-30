@@ -29,9 +29,17 @@ jobs:
           for t in git tar gzip sha256sum readelf strings file sed awk; do
             command -v "$t" >/dev/null && echo "have $t" || echo "MISSING $t"
           done
-          tar --version | sed -n 1p
-          /usr/sgug/bin/gcc --version | sed -n 1p
+          for t in gtar gsha256sum greadelf openssl elfdump; do
+            command -v "$t" >/dev/null && echo "have $t" || echo "MISSING $t"
+          done
+          echo "--- tar flavour ---"
+          tar --version 2>&1 | sed -n 1p || echo "stock IRIX tar, no GNU flags"
+          echo "--- compilers ---"
+          test -x /usr/sgug/bin/gcc && /usr/sgug/bin/gcc --version | sed -n 1p \
+            || echo "MISSING /usr/sgug/bin/gcc"
           test -x /usr/bin/c99 && echo "have /usr/bin/c99" || echo "MISSING /usr/bin/c99"
+          echo "--- sgug ---"
+          ls /usr/sgug/bin 2>/dev/null | wc -l
 
       - name: Portability gate
         run: |
