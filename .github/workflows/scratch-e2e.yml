@@ -42,7 +42,6 @@ jobs:
         run: |
           set -eu
           ver=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*"\(.*\)".*/\1/p' src/version.h)
-          echo "VER=$ver" >> "$GITHUB_ENV"
           echo "building $ver from $GITHUB_SHA"
 
       # Each make target is its own step: the per-step deadline is 3600s of wall
@@ -95,7 +94,7 @@ jobs:
           # the closest a single machine can get to "starts on a stock box".
           echo "--- clean environment ---"
           env -i ./build/runner version
-          ver="$VER"
+          ver=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*"\(.*\)".*/\1/p' src/version.h)
           if [ "$(env -i ./build/runner version | sed -n 1p)" != "irix-actions-runner $ver" ]; then
             echo "the built binary does not report $ver"; exit 1
           fi
@@ -159,12 +158,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Version from the header
-        run: |
-          set -euo pipefail
-          ver=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*"\(.*\)".*/\1/p' src/version.h)
-          echo "VER=$ver" >> "$GITHUB_ENV"
-
       - uses: actions/download-artifact@v4
         with:
           name: irix-binary
@@ -199,7 +192,7 @@ jobs:
       - name: Package
         run: |
           set -euo pipefail
-          ver="$VER"
+          ver=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*"\(.*\)".*/\1/p' src/version.h)
           name="irix-actions-runner-$ver-irix6.5-mips-n32"
           rm -rf dist "$name"
           mkdir -p "$name" dist
