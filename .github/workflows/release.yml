@@ -1,10 +1,10 @@
 name: release
 
-# Builds the shipping binary on real SGI hardware and publishes a draft release.
+# Builds the shipping binary on IRIX and publishes a draft release.
 #
 # Triggered by pushing a tag. The version is not invented here: it must already
 # agree across the tag, SGUG_PROJECT_VERSION in src/version.h, and a CHANGELOG
-# section, or the run fails before it touches the slow machine.
+# section, or the run fails before it reaches the IRIX build.
 #
 # Two constraints shape every step in `build-irix`, both from this runner, and
 # neither applies to `build-linux`:
@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   # Cheap gate on a hosted runner. A mistyped tag fails here in under a minute
-  # rather than after a full build on a 400MHz machine.
+  # rather than after a full IRIX build.
   preflight:
     runs-on: ubuntu-latest
     steps:

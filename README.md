@@ -54,7 +54,7 @@ job message carries the credentials it reports with.
 ### What is different under Docker
 
 - **iris decodes MIPS IV** whatever CPU it reports, so a build can pass here and
-  fault on real hardware.
+  fault on an R4400.
 - **Each job gets a fresh container.** Nothing survives between jobs, and
   `actions/checkout` re-clones every time.
 - **583 MiB and about one core per job.**
@@ -308,7 +308,7 @@ and hand the result to IRIX in a separate job.
 ### Example: cross-build, then verify
 
 Vintage SGI CPUs take hours on a large package where a cross-compiler takes
-minutes. This shape gives the SGI only the part that needs real hardware.
+minutes. This shape gives the SGI only the part that has to run on IRIX.
 
 ```yaml
 jobs:
