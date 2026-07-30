@@ -3,7 +3,11 @@ name: scratch linux
 # Temporary. Proves the build-linux matrix on both hosted arches without
 # cutting a tag. Delete before merging.
 
-on: [workflow_dispatch]
+# push, not workflow_dispatch: a dispatch is only offered for workflows that
+# already exist on the default branch, and this one never will.
+on:
+  push:
+    branches: [release/linux-artifacts]
 
 permissions:
   contents: read
