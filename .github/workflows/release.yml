@@ -88,10 +88,12 @@ jobs:
           # does not remove untracked files, so a release could otherwise
           # inherit object files from an unrelated commit.
           git clean -xdff
-          for t in git tar gzip sha256sum readelf strings file sed awk; do
+          # Packaging moved to a hosted runner, so this machine no longer needs
+          # sha256sum or a GNU tar. What is left is the build and the checks
+          # that only mean something here.
+          for t in git readelf strings file sed awk; do
             command -v "$t" >/dev/null || { echo "missing: $t"; exit 1; }
           done
-          tar --version | sed -n 1p
           /usr/sgug/bin/gcc --version | sed -n 1p
           test -x /usr/bin/c99 || { echo "MIPSPro c99 is not installed"; exit 1; }
 
@@ -193,37 +195,97 @@ jobs:
             i=$((i + 1))
           done
 
-      # Packed here, not on the hosted runner: actions/download-artifact does
-      # not restore Unix modes, so a bare binary would arrive without its
-      # executable bit. Inside a tar the mode is part of the payload.
-      - name: Package
+      # Only the binary leaves IRIX. Every ELF assertion and the tarball are
+      # done on a hosted runner, which has GNU tar and coreutils; the guest and
+      # the Octane need neither. `strip` cannot move: binutils on x86 has no
+      # MIPS BFD target and refuses the file outright.
+      - name: Strip, prove it still runs, and record what built it
         run: |
           set -eu
+          strip build/runner
+          ls -l build/runner
+          env -i ./build/runner version
+
+          # The packaging job cannot see this machine, so the facts that only
+          # exist here travel with the binary.
+          {
+            echo "built on   $(uname -a)"
+            echo "compiler   $(/usr/sgug/bin/gcc --version | sed -n 1p)"
+            echo "openssl    $(strings -a build/runner | grep '^OpenSSL 1\.' | sed -n 1p)"
+          } > build/BUILD-FACTS
+          cat build/BUILD-FACTS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: irix-binary
+          path: |
+            build/runner
+            build/BUILD-FACTS
+
+  # Everything a MIPS binary can be asserted about from x86: `file` and
+  # `readelf` are target-independent readers. `strip` is not, which is why it
+  # stays on IRIX; binutils here has no MIPS BFD target and refuses the file.
+  package-irix:
+    needs: build-irix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: irix-binary
+          path: bin
+
+      - name: The binary is portable to any IRIX 6.5 machine
+        run: |
+          set -euo pipefail
+          # download-artifact does not restore Unix modes. 0755 is the intent,
+          # not something to preserve.
+          chmod 0755 bin/runner
+          desc=$(file bin/runner)
+          echo "$desc"
+          case "$desc" in
+            *MIPS-IV*) echo "ISA is MIPS IV; that excludes R4000 and R5000"; exit 1 ;;
+            *N32*MIPS-III*) ;;
+            *) echo "expected an N32 MIPS-III object"; exit 1 ;;
+          esac
+          case "$desc" in *MSB*) ;; *) echo "not big-endian"; exit 1 ;; esac
+
+          needed=$(readelf -d bin/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
+          echo "needs $needed"
+          if [ "$needed" != "libc.so.1 libm.so libpthread.so " ]; then
+            echo "unexpected library dependencies: $needed"; exit 1
+          fi
+          for bad in libssl libcrypto libz sgug; do
+            if readelf -d bin/runner | grep -q "$bad"; then
+              echo "not self-contained: links $bad"; exit 1
+            fi
+          done
+
+      - name: Package
+        run: |
+          set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
           name="irix-actions-runner-$ver-irix6.5-mips-n32"
           rm -rf dist "$name"
           mkdir -p "$name" dist
 
-          cp build/runner "$name/runner"
+          cp bin/runner "$name/runner"
           cp contrib/cacert.pem "$name/cert.pem"
           cp README.md LICENSE CHANGELOG.md "$name/"
           cp man/runner.1 "$name/runner.1"
-          strip "$name/runner"
           chmod 0755 "$name/runner"
           chmod 0644 "$name/cert.pem" "$name/README.md" "$name/LICENSE" \
               "$name/CHANGELOG.md" "$name/runner.1"
-
-          # The binary still has to work after stripping.
-          (cd "$name" && env -i ./runner version)
 
           {
             echo "project    $ver"
             echo "commit     $GITHUB_SHA"
             echo "tag        $GITHUB_REF_NAME"
             echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "built on   $(uname -a)"
-            echo "compiler   $(/usr/sgug/bin/gcc --version | sed -n 1p)"
-            echo "openssl    $(strings -a build/runner | grep '^OpenSSL 1\.' | sed -n 1p)"
+            cat bin/BUILD-FACTS
+            echo "packaged   $(uname -srm)"
             echo "object     $(file "$name/runner")"
             echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"
             echo "ca bundle  $(sed -n 's/^## Certificate data from Mozilla as of: //p' contrib/cacert.pem)"
@@ -422,7 +484,7 @@ jobs:
           path: dist
 
   publish:
-    needs: [build-irix, build-linux]
+    needs: [package-irix, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
