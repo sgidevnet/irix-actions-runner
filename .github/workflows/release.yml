@@ -1,18 +1,19 @@
 name: release
 
-# Builds the shipping binary on IRIX and publishes a draft release.
+# Cross-compiles every target on Linux, runs each binary on hardware of its own
+# architecture, and publishes a draft release.
 #
 # Triggered by pushing a tag. The version is not invented here: it must already
 # agree across the tag, SGUG_PROJECT_VERSION in src/version.h, and a CHANGELOG
-# section, or the run fails before it reaches the IRIX build.
+# section, or the run fails before it reaches any build.
 #
-# Two constraints shape every step in `build-irix`, both from this runner, and
-# neither applies to `build-linux`:
+# Two constraints shape every step in `test-irix`, both from this runner, and
+# neither applies anywhere else:
 #
 #   1. There is no expression evaluator, so `${{ }}` is unusable there. In a
-#      `run:` body it is now a hard error; in a `with:` value it silently reads
-#      as absent. Use the $GITHUB_* shell variables instead. `build-linux` is on
-#      hosted runners and reads `${{ matrix.* }}` normally.
+#      `run:` body it is a hard error; in a `with:` value it silently reads as
+#      absent. Use the $GITHUB_* shell variables instead. Every other job is on
+#      a hosted runner and reads `${{ matrix.* }}` normally.
 #   2. No GITHUB_TOKEN reaches steps, so IRIX cannot call the REST API. The
 #      release itself is created from a hosted runner.
 #
@@ -39,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Version agrees across tag, header, changelog and manpage
+      - name: Version
         run: |
           set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
@@ -63,7 +64,7 @@ jobs:
           fi
           echo "version $ver agrees"
 
-      - name: CA bundle is present and plausible
+      - name: CA bundle
         run: |
           set -euo pipefail
           n=$(grep -c 'BEGIN CERTIFICATE' contrib/cacert.pem)
@@ -72,33 +73,21 @@ jobs:
 
   build-irix:
     needs: preflight
-    runs-on: [self-hosted, irix]
-    timeout-minutes: 180
+    runs-on: ubuntu-24.04
+    container: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.2.0' }}
+    timeout-minutes: 30
+    # Named, not inherited: the runner resolves a container's shell to sh, and
+    # dash has no pipefail.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Clean the workspace and check the toolchain
-        run: |
-          set -eu
-          uname -a
-          # This runner never wipes the workspace between jobs, and checkout
-          # does not remove untracked files, so a release could otherwise
-          # inherit object files from an unrelated commit.
-          git clean -xdff
-          for t in git tar gzip sha256sum readelf strings file sed awk; do
-            command -v "$t" >/dev/null || { echo "missing: $t"; exit 1; }
-          done
-          tar --version | sed -n 1p
-          /usr/sgug/bin/gcc --version | sed -n 1p
-          test -x /usr/bin/c99 || { echo "MIPSPro c99 is not installed"; exit 1; }
 
       # Repeated from preflight, against the tree that was actually checked out.
-      - name: Version agrees with the checked-out tree
+      - name: Version
         run: |
-          set -eu
+          set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
           hdr=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*"\(.*\)".*/\1/p' src/version.h)
           if [ "$hdr" != "$ver" ]; then
@@ -113,29 +102,26 @@ jobs:
           fi
           echo "building $ver from $GITHUB_SHA"
 
-      # Each make target is its own step: the per-step deadline is 3600s of wall
-      # clock and is not configurable from the workflow, and a MIPSPro pass over
-      # every source file is not fast here.
+      # The %z grep half. `make check` gates its MIPSPro sweep on uname and
+      # prints a skip line off IRIX.
       - name: Portability gate
         run: |
-          set -eu
-          make clean
+          set -euo pipefail
           make check
-
-      - name: Unit tests
-        run: |
-          set -eu
-          make -j2 test
 
       - name: Build
         run: |
-          set -eu
-          make -j2
-          ls -l build/runner
+          set -euo pipefail
+          # IRIX_SYSROOT is what puts the Makefile on its cross branch. The
+          # image sets it, along with IRIX_OPENSSL and MOGRIX_NO_DLMALLOC.
+          test -n "${IRIX_SYSROOT:-}" || { echo "not an IRIX cross image"; exit 1; }
+          make -j"$(nproc)"
+          make -j"$(nproc)" tests
+          ls -l build/runner build/test_json
 
-      - name: The binary is portable to any IRIX 6.5 machine
+      - name: ELF assertions
         run: |
-          set -eu
+          set -euo pipefail
           desc=$(file build/runner)
           echo "$desc"
           # MIPS III is R4000 and later, which is every CPU that runs IRIX 6.5.
@@ -147,7 +133,7 @@ jobs:
           esac
           case "$desc" in *MSB*) ;; *) echo "not big-endian"; exit 1 ;; esac
 
-          readelf -d build/runner | grep -E 'NEEDED|RPATH'
+          readelf -d build/runner | grep -E 'NEEDED|RPATH' || true
           needed=$(readelf -d build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
           if [ "$needed" != "libc.so.1 libm.so libpthread.so " ]; then
             echo "unexpected library dependencies: $needed"; exit 1
@@ -158,9 +144,65 @@ jobs:
             fi
           done
 
-          # Proves rld resolves every symbol against base IRIX, with no
-          # LD_LIBRARYN32_PATH and nothing inherited from the runner. This is
-          # the closest a single machine can get to "starts on a stock box".
+      # llvm-strip, not strip: x86 binutils has no MIPS BFD target, LLVM's does.
+      # SGUG's own strip dies with SIGILL on an LLD-produced binary.
+      - name: Strip and stamp
+        run: |
+          set -euo pipefail
+          llvm-strip build/runner
+          ls -l build/runner
+          {
+            echo "built on   $(uname -a) (cross)"
+            echo "compiler   $(clang --version | sed -n 1p)"
+            echo "linker     $(basename "$IRIX_LLD")"
+            echo "openssl    $(strings -a build/runner | grep '^OpenSSL 1\.' | sed -n 1p)"
+          } > build/BUILD-FACTS
+          cat build/BUILD-FACTS
+          find build \( -name '*.o' -o -name '*.d' \) -delete
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: irix-binary
+          path: build
+
+  # The only machine that can say whether the cross build works. Nothing here
+  # compiles or rewrites; it runs the stripped binary that ships.
+  test-irix:
+    needs: build-irix
+    runs-on: [self-hosted, irix]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Before the download, not after: this runner never wipes the workspace,
+      # and git clean would take the artifact with it.
+      - name: Clean
+        run: |
+          set -eu
+          git clean -xdff
+
+      # Named, because the two ends disagree about the leading component:
+      # build-irix uploads from a hosted runner, which strips it, and this
+      # runner's own upload-artifact keeps it.
+      - uses: actions/download-artifact@v4
+        with:
+          name: irix-binary
+          path: build
+
+      - name: Unit tests
+        run: |
+          set -eu
+          chmod 0755 build/runner build/test_*
+          make test-run
+
+      - name: Clean-environment start
+        run: |
+          set -eu
+          # env -i proves rld resolves every symbol against base IRIX, with no
+          # LD_LIBRARYN32_PATH and nothing inherited from the runner.
           echo "--- clean environment ---"
           env -i ./build/runner version
           ver="${GITHUB_REF_NAME#v}"
@@ -168,7 +210,7 @@ jobs:
             echo "the built binary does not report $ver"; exit 1
           fi
 
-      - name: TLS works against the bundle we ship
+      - name: TLS selftest
         run: |
           set -eu
           ca="$PWD/contrib/cacert.pem"
@@ -178,7 +220,7 @@ jobs:
 
           # Negative control. Without it a future change that ignores
           # SSL_CERT_FILE would leave this gate passing forever while proving
-          # only that SGUG-RSE happens to be installed on the build machine.
+          # only that SGUG-RSE happens to be installed on the machine.
           if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
             echo "selftest passed with a nonexistent bundle; this gate proves nothing"
             exit 1
@@ -193,37 +235,70 @@ jobs:
             i=$((i + 1))
           done
 
-      # Packed here, not on the hosted runner: actions/download-artifact does
-      # not restore Unix modes, so a bare binary would arrive without its
-      # executable bit. Inside a tar the mode is part of the payload.
+
+  # `file` and `readelf` are target-independent readers, so the ISA and NEEDED
+  # assertions run again here, against the artifact rather than the build tree.
+  package-irix:
+    needs: test-irix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: irix-binary
+          path: bin
+
+      - name: ELF assertions
+        run: |
+          set -euo pipefail
+          # download-artifact does not restore Unix modes. 0755 is the intent,
+          # not something to preserve.
+          chmod 0755 bin/runner
+          desc=$(file bin/runner)
+          echo "$desc"
+          case "$desc" in
+            *MIPS-IV*) echo "ISA is MIPS IV; that excludes R4000 and R5000"; exit 1 ;;
+            *N32*MIPS-III*) ;;
+            *) echo "expected an N32 MIPS-III object"; exit 1 ;;
+          esac
+          case "$desc" in *MSB*) ;; *) echo "not big-endian"; exit 1 ;; esac
+
+          needed=$(readelf -d bin/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
+          echo "needs $needed"
+          if [ "$needed" != "libc.so.1 libm.so libpthread.so " ]; then
+            echo "unexpected library dependencies: $needed"; exit 1
+          fi
+          for bad in libssl libcrypto libz sgug; do
+            if readelf -d bin/runner | grep -q "$bad"; then
+              echo "not self-contained: links $bad"; exit 1
+            fi
+          done
+
       - name: Package
         run: |
-          set -eu
+          set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
           name="irix-actions-runner-$ver-irix6.5-mips-n32"
           rm -rf dist "$name"
           mkdir -p "$name" dist
 
-          cp build/runner "$name/runner"
+          cp bin/runner "$name/runner"
           cp contrib/cacert.pem "$name/cert.pem"
           cp README.md LICENSE CHANGELOG.md "$name/"
           cp man/runner.1 "$name/runner.1"
-          strip "$name/runner"
           chmod 0755 "$name/runner"
           chmod 0644 "$name/cert.pem" "$name/README.md" "$name/LICENSE" \
               "$name/CHANGELOG.md" "$name/runner.1"
-
-          # The binary still has to work after stripping.
-          (cd "$name" && env -i ./runner version)
 
           {
             echo "project    $ver"
             echo "commit     $GITHUB_SHA"
             echo "tag        $GITHUB_REF_NAME"
             echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "built on   $(uname -a)"
-            echo "compiler   $(/usr/sgug/bin/gcc --version | sed -n 1p)"
-            echo "openssl    $(strings -a build/runner | grep '^OpenSSL 1\.' | sed -n 1p)"
+            cat bin/BUILD-FACTS
+            echo "packaged   $(uname -srm)"
             echo "object     $(file "$name/runner")"
             echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"
             echo "ca bundle  $(sed -n 's/^## Certificate data from Mozilla as of: //p' contrib/cacert.pem)"
@@ -246,19 +321,18 @@ jobs:
           name: irix-dist
           path: dist
 
-  # Native on both arches rather than cross-compiled, because a cross-built
-  # binary cannot run `make test` and would ship having never executed. The
-  # arm64 label is only ever version-pinned, so x86_64 is pinned to match and
-  # the glibc floor moves only when this file does.
+  # Cross-compiled on x86_64 for both Linux targets, then run on a real machine
+  # of that arch in test-linux. One build host keeps one glibc floor and one
+  # toolchain.
   build-linux:
     needs: preflight
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-24.04,     arch: x86_64, elf: x86-64 }
-          - { runner: ubuntu-24.04-arm, arch: arm64,  elf: aarch64 }
-    runs-on: ${{ matrix.runner }}
+          - { arch: x86_64, triple: "",                    elf: x86-64,  pkg: "" }
+          - { arch: arm64,  triple: aarch64-linux-gnu,     elf: aarch64, pkg: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross" }
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -269,16 +343,34 @@ jobs:
       - name: Toolchain
         run: |
           set -euo pipefail
-          if [ ! -f /usr/include/openssl/ssl.h ]; then
+          sudo apt-get update -qq
+          if [ -n "${{ matrix.triple }}" ]; then
+            # OpenSSL for the target arch comes from ports; archive and
+            # security carry amd64 only, and apt fails the whole update on a
+            # 404 for one index. So pin the stock sources to amd64 before
+            # adding the architecture. 24.04 uses deb822, older images the
+            # one-line format, hence both.
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              sudo sed -i '/^Types:/a Architectures: amd64' \
+                /etc/apt/sources.list.d/ubuntu.sources
+            fi
+            sudo sed -i 's/^deb \([^[]\)/deb [arch=amd64] \1/' \
+              /etc/apt/sources.list 2>/dev/null || true
+            sudo dpkg --add-architecture arm64
+            sudo tee /etc/apt/sources.list.d/ports.list >/dev/null <<'PORTS'
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe
+          PORTS
             sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends ${{ matrix.pkg }} libssl-dev:arm64
+          else
             sudo apt-get install -y --no-install-recommends libssl-dev
           fi
           uname -srm
           cc --version | sed -n 1p
-          openssl version
           ldd --version | sed -n 1p
 
-      - name: Version agrees with the checked-out tree
+      - name: Version
         run: |
           set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
@@ -290,7 +382,6 @@ jobs:
           if [ "$man" != "$ver" ]; then
             echo "tag says $ver, man/runner.1 says $man"; exit 1
           fi
-          echo "building $ver from $GITHUB_SHA"
 
       # The %z grep. The MIPSPro half skips itself off IRIX.
       - name: Portability gate
@@ -299,24 +390,23 @@ jobs:
           make clean
           make check
 
-      - name: Unit tests
-        run: |
-          set -euo pipefail
-          make -j"$(nproc)" test
-
       - name: Build
         run: |
           set -euo pipefail
-          make -j"$(nproc)"
-          ls -l build/runner
+          if [ -n "${{ matrix.triple }}" ]; then
+            export CC=${{ matrix.triple }}-gcc
+          fi
+          # Test binaries are built here and executed in test-linux, so both
+          # targets are produced by the same toolchain on the same machine.
+          make -j"$(nproc)" CC="${CC:-cc}"
+          make -j"$(nproc)" CC="${CC:-cc}" tests
+          ls -l build/runner build/test_json
 
-      - name: The binary is what this matrix entry claims
+      - name: ELF assertions
         run: |
           set -euo pipefail
           desc=$(file build/runner)
           echo "$desc"
-          # Catches a matrix entry that landed on the wrong runner, which
-          # otherwise ships an x86_64 binary named arm64.
           case "$desc" in *"ELF 64-bit LSB"*) ;; *) echo "not a 64-bit LSB ELF"; exit 1 ;; esac
           case "$desc" in
             *${{ matrix.elf }}*) ;;
@@ -324,9 +414,8 @@ jobs:
           esac
 
           # An allowlist, not the exact string the IRIX job asserts: two arches
-          # have two loaders, and glibc 2.34 folded libpthread into libc.
-          # The loader is a NEEDED entry on aarch64 and not on x86_64, so both
-          # are listed rather than one being derived from the other.
+          # have two loaders, and glibc 2.34 folded libpthread into libc. The
+          # loader is a NEEDED entry on aarch64 and not on x86_64.
           allow="libc.so.6 libm.so.6 libssl.so.3 libcrypto.so.3"
           allow="$allow ld-linux-x86-64.so.2 ld-linux-aarch64.so.1"
           needed=$(readelf -d build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')
@@ -337,8 +426,6 @@ jobs:
               *) echo "unexpected dependency: $n"; exit 1 ;;
             esac
           done
-          # The inverse of the IRIX gate: OpenSSL is linked statically there and
-          # dynamically here, so its absence would mean something went wrong.
           for want in libssl.so.3 libcrypto.so.3; do
             case " $needed " in
               *" $want "*) ;;
@@ -346,6 +433,70 @@ jobs:
             esac
           done
 
+      # The packaging job cannot see the toolchain that produced this, so the
+      # facts travel with the binary. Nothing else records the glibc floor.
+      #
+      # strip has to happen here for the same reason: the target's binutils are
+      # installed on this machine and not on the packaging one. The Linux half
+      # of CFLAGS carries -g, so an unstripped runner is most of the tarball.
+      - name: Strip and stamp
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.triple }}" ]; then
+            export CC=${{ matrix.triple }}-gcc
+            ${{ matrix.triple }}-strip build/runner
+          else
+            strip build/runner
+          fi
+          ls -l build/runner
+          {
+            echo "built on   $(uname -a)"
+            echo "compiler   $(${CC:-cc} --version | sed -n 1p)"
+            echo "glibc      $(ldd --version | sed -n 1p)"
+            echo "openssl    $(openssl version)"
+          } > build/BUILD-FACTS
+          cat build/BUILD-FACTS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: build/
+
+  # Runs what build-linux produced, on a machine of that architecture. A
+  # cross-built binary that has never executed is not evidence of anything.
+  test-linux:
+    needs: build-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: arm64,  runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: build
+
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libssl3 || true
+          chmod 0755 build/* 2>/dev/null || true
+          uname -srm
+          file build/runner
+          # test-run executes the binaries as built; it never compiles.
+          make test-run
+
+          # A clean environment, so this proves the binary resolves every
+          # symbol against a stock image and inherits nothing from the runner.
+          # The assertion moved here from build-linux, which cross-compiles and
+          # so cannot run what it produced.
           echo "--- clean environment ---"
           env -i ./build/runner version
           ver="${GITHUB_REF_NAME#v}"
@@ -353,12 +504,12 @@ jobs:
             echo "the built binary does not report $ver"; exit 1
           fi
 
-      - name: TLS works against the system trust store
+      # No bundle ships on Linux, so this tests that the binary finds the
+      # distribution's own store. Without the negative control it would pass on
+      # a build that reads no store at all.
+      - name: TLS selftest
         run: |
           set -euo pipefail
-          # No cert.pem ships on Linux, so this proves the compiled-in path at
-          # src/net/tls.c:18 resolves. The negative control is what stops the
-          # gate passing forever if that lookup is ever ignored.
           if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
             echo "selftest passed with a nonexistent bundle; this gate proves nothing"
             exit 1
@@ -373,6 +524,25 @@ jobs:
             i=$((i + 1))
           done
 
+  # Packaged only after the binary has run on hardware of its own
+  # architecture, and on the machine that has GNU tar rather than the one that
+  # built it, which is the same split build-irix and package-irix use.
+  package-linux:
+    needs: test-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: bin
+
       - name: Package
         run: |
           set -euo pipefail
@@ -381,34 +551,30 @@ jobs:
           rm -rf dist "$name"
           mkdir -p "$name" dist
 
-          # No cert.pem: every Linux distribution maintains its own trust store,
-          # and a bundle beside the binary would silently override it with a
-          # snapshot frozen at release time.
-          cp build/runner "$name/runner"
+          # download-artifact does not restore Unix modes. 0755 is the intent,
+          # not something to preserve.
+          cp bin/runner "$name/runner"
           cp README.md LICENSE CHANGELOG.md "$name/"
           cp man/runner.1 "$name/runner.1"
-          strip "$name/runner"
           chmod 0755 "$name/runner"
-          chmod 0644 "$name/README.md" "$name/LICENSE" \
-              "$name/CHANGELOG.md" "$name/runner.1"
-
-          (cd "$name" && env -i ./runner version)
+          chmod 0644 "$name/README.md" "$name/LICENSE" "$name/CHANGELOG.md" \
+              "$name/runner.1"
 
           {
             echo "project    $ver"
             echo "commit     $GITHUB_SHA"
             echo "tag        $GITHUB_REF_NAME"
             echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "built on   $(uname -srm)"
-            echo "compiler   $(cc --version | sed -n 1p)"
-            echo "openssl    $(openssl version)"
-            echo "glibc      $(ldd --version | sed -n 1p)"
+            cat bin/BUILD-FACTS
+            echo "packaged   $(uname -srm)"
             echo "object     $(file "$name/runner")"
             echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"
           } > "$name/BUILD-INFO"
           chmod 0644 "$name/BUILD-INFO"
           cat "$name/BUILD-INFO"
 
+          # ustar and a fixed mtime for the same reason as the IRIX tarball:
+          # the same tag produces the same bytes.
           tar --format=ustar --owner=0 --group=0 --numeric-owner --sort=name \
               --mtime="@$(git log -1 --format=%ct)" -cf "dist/$name.tar" "$name"
           gzip -9n "dist/$name.tar"
@@ -422,7 +588,7 @@ jobs:
           path: dist
 
   publish:
-    needs: [build-irix, build-linux]
+    needs: [package-irix, package-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -434,7 +600,7 @@ jobs:
           pattern: '*-dist*'
           path: dl
 
-      - name: Verify what came off the build machines
+      - name: Verify tarballs
         run: |
           set -euo pipefail
           n=0
@@ -499,7 +665,7 @@ jobs:
           cat body.md >> notes.md
           cat notes.md
 
-      - name: Create or update the draft release
+      - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

@@ -1,7 +1,9 @@
 name: ci
 
-# Merge gate. Covers everything except the compat layer and anything IRIX
-# specific, which still needs the hardware.
+# Merge gate: host build, host tests, and the `%z` grep.
+#
+# TODO: cross-build for IRIX here. The release image does it in under a second,
+# so an IRIX compile break currently waits for a tag.
 
 on:
   pull_request:

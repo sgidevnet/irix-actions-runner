@@ -1,10 +1,10 @@
 name: irix
 
-# Runs on the SGI Octane2 via this repository own runner.
+# Runs on whatever IRIX runner is registered, hardware or an emulated pool.
 #
-# Kept small: it exists to prove the runner executes a job end to
-# end, not to build anything. timeout-minutes is short because a runner that
-# accepts a job and then dies would otherwise hold the queue for six hours.
+# Kept small: it proves the runner executes a job end to end, not that anything
+# builds. timeout-minutes is short because a runner that accepts a job and then
+# dies would otherwise hold the queue for six hours.
 
 on:
   workflow_dispatch:
@@ -17,12 +17,14 @@ jobs:
     runs-on: [self-hosted, irix]
     timeout-minutes: 5
     steps:
-      - name: Identify the machine
+      # sed, not head. Steps run under -o pipefail, so `hinv | head -5` kills
+      # hinv with SIGPIPE and fails the step.
+      - name: Machine
         run: |
           uname -a
-          hinv | head -5
+          hinv | sed -n 1,5p
 
-      - name: Check the toolchain
+      - name: Toolchain
         run: |
           echo "PATH=$PATH"
-          /usr/sgug/bin/gcc --version | head -1
+          /usr/sgug/bin/gcc --version | sed -n 1p

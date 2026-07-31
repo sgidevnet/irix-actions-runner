@@ -93,6 +93,8 @@ that skill fails the step by name.
 - **`upload-artifact` keeps the leading path component.** `path: out` uploads
   members named `out/...`, where the reference action strips it, so a
   round trip through `download-artifact` lands one level deeper than you wrote.
+  In a workflow spanning both kinds of runner, that means an artifact's shape
+  depends on which end packed it. Name `path:` on the download.
 
 Beware SIGPIPE under `pipefail`: `cmd | head -1` and `cmd | grep -m1` make the
 producer die of SIGPIPE, which fails the step. Use `sed -n 1p`.
@@ -150,7 +152,7 @@ make
 cp build/runner /tmp/pool/runner        # ETXTBSY while a serve holds it open
 cd /tmp/pool && ./runner serve --count 4 --name-prefix irix \
     --image ghcr.io/sgidevnet/irix-worker:0.4.3-indy > serve.log 2>&1 &
-gh workflow run irix-dev.yml --ref <branch>
+gh workflow run irix.yml --ref <branch>
 ```
 
 **Always pass `--image`.** The default is the bare name `irix-worker:latest`,
@@ -190,7 +192,7 @@ A running binary cannot be overwritten in place, so kill it first:
 ssh $SGI "kill \$(ps -e | grep '[r]unner' | awk '{print \$1}'); \
     cp $SRC/build/runner $RUN/runner; \
     cd $RUN && nohup ./runner run > run.log 2>&1 &"
-gh workflow run irix-dev.yml --ref <branch>
+gh workflow run irix.yml --ref <branch>
 ```
 
 ## Cut a release
