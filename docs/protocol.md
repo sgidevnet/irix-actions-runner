@@ -232,8 +232,26 @@ fifteen requests a second forever. Measured 415 messages in 30 seconds.
 
 ### `POST {run_service_url}renewjob`
 
-The v1 job-request lock renewal does not apply: `requestId` is `0` and
-`lockedUntil` is `0001-01-01T00:00:00`, .NET's `DateTime.MinValue`.
+```json
+{"planId": "...", "jobId": "..."}
+```
+
+**Required, roughly every minute.** The v1 lock fields are empty, `requestId`
+is `0` and `lockedUntil` is `0001-01-01T00:00:00`, .NET's `DateTime.MinValue`,
+which reads as if renewal were vestigial. It is not: the run service leases the
+workflow instance for about ten minutes from `acquirejob` and drops it without
+renewal.
+
+Measured with a job whose only step slept: failed at 10:01 with the step still
+`in_progress`, and `completejob` then answered
+
+```json
+{"source":"actions-run-service","statusCode":404,
+ "errorMessage":"workflow instance not found"}
+```
+
+Nothing before that point complains, so any job shorter than the lease looks
+completely healthy.
 
 ### `POST {run_service_url}completejob`
 

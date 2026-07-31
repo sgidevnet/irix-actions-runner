@@ -27,6 +27,13 @@
 #define FEED_BATCH 100
 #define FEED_INTERVAL_MS 500
 
+/*
+ * The run service's lease is about ten minutes from acquirejob, measured with
+ * a job that did nothing but sleep. A minute leaves room for a few failed
+ * renewals before it lapses.
+ */
+#define RENEW_INTERVAL_MS 60000
+
 /* Consecutive failures before the feed is abandoned for the rest of the job. */
 #define FEED_MAX_FAILURES 3
 
@@ -84,6 +91,9 @@ struct sgug_reporter {
 	int feed_off;
 	int feed_failures;
 	int64_t feed_due;
+
+	/* Next renewjob. See renew_job(). */
+	int64_t renew_due;
 
 	/*
 	 * The whole-job log, accumulated as steps run rather than stitched from
@@ -797,9 +807,60 @@ report_flush(sgug_reporter *r, int force)
 	return rc;
 }
 
+/*
+ * Keep the workflow instance alive.
+ *
+ * The run service drops it about ten minutes after acquirejob unless the
+ * runner renews, and once it is gone completejob answers 404 "workflow
+ * instance not found" and the job is failed with whatever steps had already
+ * been reported. Nothing else in the protocol hints at this: the v1 lock
+ * fields are empty on v2, which is why docs/protocol.md recorded renewjob as
+ * not applying.
+ *
+ * Failure is not fatal. A renewal that does not land costs nothing until the
+ * lease actually expires, and a job that is nearly done should not be killed
+ * by one bad request.
+ */
+static void
+renew_job(sgug_reporter *r)
+{
+	sgug_jsonw *w;
+	char url[SGUG_MAX_URL];
+	char ctype[128];
+	const char *body;
+	size_t len;
+
+	if (r->job->service_url[0] == '\0')
+		return;
+	if (sgug_monotonic_ms() < r->renew_due)
+		return;
+	r->renew_due = sgug_monotonic_ms() + RENEW_INTERVAL_MS;
+
+	w = sgug_jsonw_new();
+	if (w == NULL)
+		return;
+	sgug_jsonw_obj_begin(w);
+	sgug_jsonw_key(w, "planId");
+	sgug_jsonw_str(w, r->job->plan_id);
+	sgug_jsonw_key(w, "jobId");
+	sgug_jsonw_str(w, r->job->job_id);
+	sgug_jsonw_obj_end(w);
+
+	body = sgug_jsonw_done(w, &len);
+	if (body != NULL) {
+		sgug_snprintf(url, sizeof(url), "%srenewjob",
+		    r->job->service_url);
+		sgug_snprintf(ctype, sizeof(ctype),
+		    "Content-Type: application/json; charset=utf-8");
+		(void)send(r, "POST", url, ctype, body, len, NULL);
+	}
+	sgug_jsonw_free(w);
+}
+
 int
 sgug_report_flush(sgug_reporter *r)
 {
+	renew_job(r);
 	return report_flush(r, 0);
 }
 
