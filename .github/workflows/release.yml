@@ -645,25 +645,10 @@ jobs:
             $0 ~ "^## \\[" v "\\]" { found = 1; next }
             found && /^## \[/ { exit }
             found { print }
-          ' CHANGELOG.md > body.md
-          if [ ! -s body.md ]; then
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
             echo "no CHANGELOG content for $ver"; exit 1
           fi
-          cat > notes.md <<'PREAMBLE'
-          Native GitHub Actions runner for SGI IRIX, and for the Linux hosts that dispatch jobs to a pool of emulated Indys.
-
-          **IRIX 6.5.22 and later**, MIPS n32, R4000 or later. Needs only `libc.so.1`, `libpthread.so` and `libm.so`, all IRIX base. `cert.pem` ships alongside and is found automatically, so SGUG-RSE is not needed to run. `git`, `zip` and `unzip` are needed only for `uses:` steps. Stock IRIX `tar` cannot decompress:
-
-              gzip -dc irix-actions-runner-*.tar.gz | tar xvf -
-
-          **Linux x86_64 and arm64.** glibc 2.39 and OpenSSL 3 from the host, Docker for `runner serve`. No `cert.pem` ships; `SSL_CERT_FILE` overrides the system trust store.
-
-          Every target is cross-compiled on Ubuntu 24.04 and its unit tests run on hardware of that architecture before packaging. The IRIX binary is tested on 6.5.22; other 6.5.x releases and other SGI models are untested. `BUILD-INFO` in each tarball records the compiler, linker and OpenSSL that produced it.
-
-          If the first connection fails, run `./runner selftest`. A wrong clock and an expired CA bundle are the usual causes.
-
-          PREAMBLE
-          cat body.md >> notes.md
           cat notes.md
 
       - name: Draft release
