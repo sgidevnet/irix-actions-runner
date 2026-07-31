@@ -66,7 +66,7 @@ endif
 DEPS := $(OBJS:.o=.d) $(TEST_SRCS:test/%.c=$(BUILD)/%.d)
 CFLAGS += -MMD -MP
 
-.PHONY: all check test clean grammar
+.PHONY: all check tests test test-run clean grammar
 
 all: $(BUILD)/runner
 
@@ -106,8 +106,21 @@ else
 	@echo "skip: MIPSPro check needs IRIX"
 endif
 
-test: $(TEST_BINS)
-	@for t in $(TEST_BINS); do $$t || exit 1; done
+# Build the test binaries without running them, for a cross build whose output
+# executes on another machine.
+tests: $(TEST_BINS)
+
+test: tests test-run
+
+# Runs test binaries that already exist, so a machine that cannot build them
+# can still be the one that executes them. The release cross-compiles on Linux
+# and runs this on a real arm64 and a real SGI, which is the only thing that
+# makes a cross-built artifact trustworthy.
+test-run:
+	@for t in $(TEST_BINS); do \
+	  test -x $$t || { echo "missing $$t; build it first"; exit 1; }; \
+	  echo "run $$t"; $$t || exit 1; \
+	done
 
 $(BUILD)/%: test/%.c $(LIB_OBJS)
 	@mkdir -p $(@D)

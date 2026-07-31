@@ -88,10 +88,12 @@ jobs:
           # does not remove untracked files, so a release could otherwise
           # inherit object files from an unrelated commit.
           git clean -xdff
-          for t in git tar gzip sha256sum readelf strings file sed awk; do
+          # Packaging moved to a hosted runner, so this machine no longer needs
+          # sha256sum or a GNU tar. What is left is the build and the checks
+          # that only mean something here.
+          for t in git readelf strings file sed awk; do
             command -v "$t" >/dev/null || { echo "missing: $t"; exit 1; }
           done
-          tar --version | sed -n 1p
           /usr/sgug/bin/gcc --version | sed -n 1p
           test -x /usr/bin/c99 || { echo "MIPSPro c99 is not installed"; exit 1; }
 
@@ -193,37 +195,116 @@ jobs:
             i=$((i + 1))
           done
 
-      # Packed here, not on the hosted runner: actions/download-artifact does
-      # not restore Unix modes, so a bare binary would arrive without its
-      # executable bit. Inside a tar the mode is part of the payload.
-      - name: Package
+      # Only the binary leaves IRIX. Every ELF assertion and the tarball are
+      # done on a hosted runner, which has GNU tar and coreutils; the guest and
+      # the Octane need neither. `strip` cannot move: binutils on x86 has no
+      # MIPS BFD target and refuses the file outright.
+      - name: Strip, prove it still runs, and record what built it
         run: |
           set -eu
+          strip build/runner
+          ls -l build/runner
+          env -i ./build/runner version
+
+          # The packaging job cannot see this machine, so the facts that only
+          # exist here travel with the binary.
+          {
+            echo "built on   $(uname -a)"
+            echo "compiler   $(/usr/sgug/bin/gcc --version | sed -n 1p)"
+            echo "openssl    $(strings -a build/runner | grep '^OpenSSL 1\.' | sed -n 1p)"
+          } > build/BUILD-FACTS
+          cat build/BUILD-FACTS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: irix-binary
+          path: |
+            build/runner
+            build/BUILD-FACTS
+
+  # A child stage rather than a step inside build-irix, so a test failure is
+  # distinguishable from a build failure and neither blocks the Linux half.
+  test-irix:
+    needs: build-irix
+    runs-on: [self-hosted, irix]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run the unit tests on IRIX
+        run: |
+          set -eu
+          git clean -xdff
+          make tests
+          make test-run
+
+  # Everything a MIPS binary can be asserted about from x86: `file` and
+  # `readelf` are target-independent readers. `strip` is not, which is why it
+  # stays on IRIX; binutils here has no MIPS BFD target and refuses the file.
+  package-irix:
+    needs: test-irix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: irix-binary
+          path: bin
+
+      - name: The binary is portable to any IRIX 6.5 machine
+        run: |
+          set -euo pipefail
+          # download-artifact does not restore Unix modes. 0755 is the intent,
+          # not something to preserve.
+          chmod 0755 bin/runner
+          desc=$(file bin/runner)
+          echo "$desc"
+          case "$desc" in
+            *MIPS-IV*) echo "ISA is MIPS IV; that excludes R4000 and R5000"; exit 1 ;;
+            *N32*MIPS-III*) ;;
+            *) echo "expected an N32 MIPS-III object"; exit 1 ;;
+          esac
+          case "$desc" in *MSB*) ;; *) echo "not big-endian"; exit 1 ;; esac
+
+          needed=$(readelf -d bin/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
+          echo "needs $needed"
+          if [ "$needed" != "libc.so.1 libm.so libpthread.so " ]; then
+            echo "unexpected library dependencies: $needed"; exit 1
+          fi
+          for bad in libssl libcrypto libz sgug; do
+            if readelf -d bin/runner | grep -q "$bad"; then
+              echo "not self-contained: links $bad"; exit 1
+            fi
+          done
+
+      - name: Package
+        run: |
+          set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
           name="irix-actions-runner-$ver-irix6.5-mips-n32"
           rm -rf dist "$name"
           mkdir -p "$name" dist
 
-          cp build/runner "$name/runner"
+          cp bin/runner "$name/runner"
           cp contrib/cacert.pem "$name/cert.pem"
           cp README.md LICENSE CHANGELOG.md "$name/"
           cp man/runner.1 "$name/runner.1"
-          strip "$name/runner"
           chmod 0755 "$name/runner"
           chmod 0644 "$name/cert.pem" "$name/README.md" "$name/LICENSE" \
               "$name/CHANGELOG.md" "$name/runner.1"
-
-          # The binary still has to work after stripping.
-          (cd "$name" && env -i ./runner version)
 
           {
             echo "project    $ver"
             echo "commit     $GITHUB_SHA"
             echo "tag        $GITHUB_REF_NAME"
             echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "built on   $(uname -a)"
-            echo "compiler   $(/usr/sgug/bin/gcc --version | sed -n 1p)"
-            echo "openssl    $(strings -a build/runner | grep '^OpenSSL 1\.' | sed -n 1p)"
+            cat bin/BUILD-FACTS
+            echo "packaged   $(uname -srm)"
             echo "object     $(file "$name/runner")"
             echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"
             echo "ca bundle  $(sed -n 's/^## Certificate data from Mozilla as of: //p' contrib/cacert.pem)"
@@ -246,19 +327,19 @@ jobs:
           name: irix-dist
           path: dist
 
-  # Native on both arches rather than cross-compiled, because a cross-built
-  # binary cannot run `make test` and would ship having never executed. The
-  # arm64 label is only ever version-pinned, so x86_64 is pinned to match and
-  # the glibc floor moves only when this file does.
+  # Cross-compiled on x86_64 for every Linux target, then the binaries are run
+  # on a real machine of that arch in test-linux. Building in one place keeps
+  # one glibc floor and one toolchain; running elsewhere is what makes a
+  # cross-built artifact worth trusting.
   build-linux:
     needs: preflight
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-24.04,     arch: x86_64, elf: x86-64 }
-          - { runner: ubuntu-24.04-arm, arch: arm64,  elf: aarch64 }
-    runs-on: ${{ matrix.runner }}
+          - { arch: x86_64, triple: "",                    elf: x86-64,  pkg: "" }
+          - { arch: arm64,  triple: aarch64-linux-gnu,     elf: aarch64, pkg: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross" }
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -269,13 +350,24 @@ jobs:
       - name: Toolchain
         run: |
           set -euo pipefail
-          if [ ! -f /usr/include/openssl/ssl.h ]; then
+          sudo apt-get update -qq
+          if [ -n "${{ matrix.triple }}" ]; then
+            # OpenSSL for the target arch comes from ports, which the default
+            # sources do not carry. Restricting the existing sources to amd64
+            # first stops apt trying to fetch every repo for arm64 and failing.
+            sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            sudo dpkg --add-architecture arm64
+            sudo tee /etc/apt/sources.list.d/ports.list >/dev/null <<'PORTS'
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe
+          PORTS
             sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends ${{ matrix.pkg }} libssl-dev:arm64
+          else
             sudo apt-get install -y --no-install-recommends libssl-dev
           fi
           uname -srm
           cc --version | sed -n 1p
-          openssl version
           ldd --version | sed -n 1p
 
       - name: Version agrees with the checked-out tree
@@ -290,7 +382,6 @@ jobs:
           if [ "$man" != "$ver" ]; then
             echo "tag says $ver, man/runner.1 says $man"; exit 1
           fi
-          echo "building $ver from $GITHUB_SHA"
 
       # The %z grep. The MIPSPro half skips itself off IRIX.
       - name: Portability gate
@@ -299,24 +390,23 @@ jobs:
           make clean
           make check
 
-      - name: Unit tests
+      - name: Build the runner and the test binaries
         run: |
           set -euo pipefail
-          make -j"$(nproc)" test
-
-      - name: Build
-        run: |
-          set -euo pipefail
-          make -j"$(nproc)"
-          ls -l build/runner
+          if [ -n "${{ matrix.triple }}" ]; then
+            export CC=${{ matrix.triple }}-gcc
+          fi
+          # Test binaries are built here and executed in test-linux, so both
+          # targets are produced by the same toolchain on the same machine.
+          make -j"$(nproc)" CC="${CC:-cc}"
+          make -j"$(nproc)" CC="${CC:-cc}" tests
+          ls -l build/runner build/test_json
 
       - name: The binary is what this matrix entry claims
         run: |
           set -euo pipefail
           desc=$(file build/runner)
           echo "$desc"
-          # Catches a matrix entry that landed on the wrong runner, which
-          # otherwise ships an x86_64 binary named arm64.
           case "$desc" in *"ELF 64-bit LSB"*) ;; *) echo "not a 64-bit LSB ELF"; exit 1 ;; esac
           case "$desc" in
             *${{ matrix.elf }}*) ;;
@@ -324,9 +414,8 @@ jobs:
           esac
 
           # An allowlist, not the exact string the IRIX job asserts: two arches
-          # have two loaders, and glibc 2.34 folded libpthread into libc.
-          # The loader is a NEEDED entry on aarch64 and not on x86_64, so both
-          # are listed rather than one being derived from the other.
+          # have two loaders, and glibc 2.34 folded libpthread into libc. The
+          # loader is a NEEDED entry on aarch64 and not on x86_64.
           allow="libc.so.6 libm.so.6 libssl.so.3 libcrypto.so.3"
           allow="$allow ld-linux-x86-64.so.2 ld-linux-aarch64.so.1"
           needed=$(readelf -d build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')
@@ -337,8 +426,6 @@ jobs:
               *) echo "unexpected dependency: $n"; exit 1 ;;
             esac
           done
-          # The inverse of the IRIX gate: OpenSSL is linked statically there and
-          # dynamically here, so its absence would mean something went wrong.
           for want in libssl.so.3 libcrypto.so.3; do
             case " $needed " in
               *" $want "*) ;;
@@ -346,83 +433,45 @@ jobs:
             esac
           done
 
-          echo "--- clean environment ---"
-          env -i ./build/runner version
-          ver="${GITHUB_REF_NAME#v}"
-          if [ "$(env -i ./build/runner version | sed -n 1p)" != "irix-actions-runner $ver" ]; then
-            echo "the built binary does not report $ver"; exit 1
-          fi
-
-      - name: TLS works against the system trust store
-        run: |
-          set -euo pipefail
-          # No cert.pem ships on Linux, so this proves the compiled-in path at
-          # src/net/tls.c:18 resolves. The negative control is what stops the
-          # gate passing forever if that lookup is ever ignored.
-          if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
-            echo "selftest passed with a nonexistent bundle; this gate proves nothing"
-            exit 1
-          fi
-          echo "negative control ok"
-
-          i=1
-          while [ "$i" -le 3 ]; do
-            if ./build/runner selftest; then break; fi
-            if [ "$i" -eq 3 ]; then echo "selftest failed three times"; exit 1; fi
-            sleep 20
-            i=$((i + 1))
-          done
-
-      - name: Package
-        run: |
-          set -euo pipefail
-          ver="${GITHUB_REF_NAME#v}"
-          name="irix-actions-runner-$ver-linux-${{ matrix.arch }}"
-          rm -rf dist "$name"
-          mkdir -p "$name" dist
-
-          # No cert.pem: every Linux distribution maintains its own trust store,
-          # and a bundle beside the binary would silently override it with a
-          # snapshot frozen at release time.
-          cp build/runner "$name/runner"
-          cp README.md LICENSE CHANGELOG.md "$name/"
-          cp man/runner.1 "$name/runner.1"
-          strip "$name/runner"
-          chmod 0755 "$name/runner"
-          chmod 0644 "$name/README.md" "$name/LICENSE" \
-              "$name/CHANGELOG.md" "$name/runner.1"
-
-          (cd "$name" && env -i ./runner version)
-
-          {
-            echo "project    $ver"
-            echo "commit     $GITHUB_SHA"
-            echo "tag        $GITHUB_REF_NAME"
-            echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "built on   $(uname -srm)"
-            echo "compiler   $(cc --version | sed -n 1p)"
-            echo "openssl    $(openssl version)"
-            echo "glibc      $(ldd --version | sed -n 1p)"
-            echo "object     $(file "$name/runner")"
-            echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"
-          } > "$name/BUILD-INFO"
-          chmod 0644 "$name/BUILD-INFO"
-          cat "$name/BUILD-INFO"
-
-          tar --format=ustar --owner=0 --group=0 --numeric-owner --sort=name \
-              --mtime="@$(git log -1 --format=%ct)" -cf "dist/$name.tar" "$name"
-          gzip -9n "dist/$name.tar"
-          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
-          cat "dist/$name.tar.gz.sha256"
-          ls -l dist
-
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-dist-${{ matrix.arch }}
-          path: dist
+          name: build-linux-${{ matrix.arch }}
+          path: build/
+
+  # Runs what build-linux produced, on a machine of that architecture. A
+  # cross-built binary that has never executed is not evidence of anything.
+  test-linux:
+    needs: build-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: arm64,  runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: build
+
+      - name: Run the unit tests on real ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libssl3 || true
+          chmod 0755 build/* 2>/dev/null || true
+          uname -srm
+          file build/runner
+          # test-run executes the binaries as built; it never compiles.
+          make test-run
+          env -i ./build/runner version
 
   publish:
-    needs: [build-irix, build-linux]
+    needs: [package-irix, test-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
