@@ -5,11 +5,12 @@
 # linker is the part that needs work, and unxmaal/mogrix carries an LLD 18 with
 # IRIX support along with the header shims and CRT sources that go with it.
 #
-# The sysroot is IRIX's own headers and lib32, captured off an install. It is
-# not in this image: pass it in as a build context directory, so nothing SGI
-# ships is baked into a public layer by accident.
+# The sysroot is IRIX's own headers and lib32, captured off an install by
+# mogrix/scripts/create-irix-sysroot.sh. It is not in this repository; pass it
+# in as a build context:
 #
-#   docker build -f Dockerfile.irix-cross --build-context sysroot=/path/to/irix-sysroot .
+#   docker build -f contrib/cross/Dockerfile \
+#       --build-context sysroot=/path/to/irix-sysroot .
 
 FROM ubuntu:24.04
 
@@ -58,9 +59,8 @@ RUN mkdir -p $IRIX_SYSROOT/usr/lib32/mips3/fixed \
 # irix-ld links six objects into every executable. Four come from mogrix's own
 # sources; safe_mem and libsoft_float_stubs have none in the tree and are
 # stubbed. safe_mem replaces IRIX libc's word-aligned mem/str routines for C++
-# overread, and soft_float_stubs covers 128-bit long double. Neither applies to
-# a C program that uses neither, and the link fails loudly if that stops being
-# true.
+# overread, and soft_float_stubs covers 128-bit long double. A C program that
+# uses neither reaches neither, and the link fails if that stops being true.
 RUN set -eux; \
     CC=/opt/mogrix/cross/bin/irix-cc; \
     $CC -c /opt/mogrix/cross/crt/crtbeginT.S -o $SGUG_STAGING/lib32/crtbeginT.o; \

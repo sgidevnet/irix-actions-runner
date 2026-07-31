@@ -34,10 +34,10 @@ TEST_BINS := $(TEST_SRCS:test/%.c=$(BUILD)/%)
 WARNS   := -Wall -Wextra -Wno-unused-parameter
 
 ifneq ($(CROSS_IRIX),)
-# Cross build, producing the same n32 MIPS-III binary the IRIX branch does.
+# Cross build. Produces the same n32 MIPS-III binary as the IRIX branch.
 # GCC dropped mips-sgi-irix6.5 in the 4.8 era, so clang is the only current
-# compiler that targets this; irix-cc wraps it with the ABI flags and the
-# header shims that stand in for MIPSPro builtins.
+# compiler for the target; irix-cc wraps it with the ABI flags and the header
+# shims that stand in for MIPSPro builtins.
 MOGRIX  ?= /opt/mogrix
 CC      := $(MOGRIX)/cross/bin/irix-cc
 # No -mips3 or -mabi=n32 here: irix-cc sets the ABI itself, and passing the GCC
@@ -141,10 +141,9 @@ tests: $(TEST_BINS)
 test: tests
 	@$(MAKE) --no-print-directory test-run
 
-# Runs test binaries that already exist, so a machine that cannot build them
-# can still be the one that executes them. The release cross-compiles on Linux
-# and runs this on a real arm64 and a real SGI, which is the only thing that
-# makes a cross-built artifact trustworthy.
+# Runs test binaries that already exist, so a machine that cannot build them can
+# still be the one that executes them. The release cross-compiles on Linux and
+# runs this on a real arm64 and a real SGI.
 test-run:
 	@for t in $(TEST_BINS); do \
 	  test -x $$t || { echo "missing $$t; build it first"; exit 1; }; \

@@ -152,7 +152,7 @@ make
 cp build/runner /tmp/pool/runner        # ETXTBSY while a serve holds it open
 cd /tmp/pool && ./runner serve --count 4 --name-prefix irix \
     --image ghcr.io/sgidevnet/irix-worker:0.4.3-indy > serve.log 2>&1 &
-gh workflow run irix-dev.yml --ref <branch>
+gh workflow run irix.yml --ref <branch>
 ```
 
 **Always pass `--image`.** The default is the bare name `irix-worker:latest`,
@@ -192,7 +192,7 @@ A running binary cannot be overwritten in place, so kill it first:
 ssh $SGI "kill \$(ps -e | grep '[r]unner' | awk '{print \$1}'); \
     cp $SRC/build/runner $RUN/runner; \
     cd $RUN && nohup ./runner run > run.log 2>&1 &"
-gh workflow run irix-dev.yml --ref <branch>
+gh workflow run irix.yml --ref <branch>
 ```
 
 ## Cut a release

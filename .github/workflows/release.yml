@@ -76,9 +76,8 @@ jobs:
     runs-on: ubuntu-24.04
     container: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.2.0' }}
     timeout-minutes: 30
-    # Named, not inherited. bash is in the image, but the runner's probe picked
-    # sh for the container and dash has no pipefail, so every step died on its
-    # first line.
+    # Named, not inherited: the runner resolves a container's shell to sh, and
+    # dash has no pipefail.
     defaults:
       run:
         shell: bash
@@ -103,9 +102,8 @@ jobs:
           fi
           echo "building $ver from $GITHUB_SHA"
 
-      # The %z grep half. `make check` gates its MIPSPro sweep on uname and says
-      # so when it skips; that compiler lives only on an SGI, and a release does
-      # not need one to prove the binary works.
+      # The %z grep half. `make check` gates its MIPSPro sweep on uname and
+      # prints a skip line off IRIX.
       - name: Portability gate
         run: |
           set -euo pipefail
@@ -146,9 +144,8 @@ jobs:
             fi
           done
 
-      # llvm-strip, not strip: binutils on x86 has no MIPS BFD target, but LLVM's
-      # reads this file happily. SGUG's own strip dies with SIGILL on an
-      # LLD-produced binary, so IRIX is the wrong place for this anyway.
+      # llvm-strip, not strip: x86 binutils has no MIPS BFD target, LLVM's does.
+      # SGUG's own strip dies with SIGILL on an LLD-produced binary.
       - name: Strip and stamp
         run: |
           set -euo pipefail
@@ -169,8 +166,7 @@ jobs:
           path: build
 
   # The only machine that can say whether the cross build works. Nothing here
-  # compiles or rewrites: it runs exactly the stripped binary that will ship,
-  # which is what makes the selftest below evidence rather than a smoke test.
+  # compiles or rewrites; it runs the stripped binary that ships.
   test-irix:
     needs: build-irix
     runs-on: [self-hosted, irix]
@@ -188,11 +184,9 @@ jobs:
           set -eu
           git clean -xdff
 
-      # path: build, because the two ends disagree about the leading component.
-      # build-irix is on a hosted runner, so `path: build` there uploads the
-      # contents and the members arrive named runner, test_json and so on. This
-      # runner's own upload-artifact would have kept the build/ prefix. Naming
-      # the destination is what makes make test-run find them either way.
+      # Named, because the two ends disagree about the leading component:
+      # build-irix uploads from a hosted runner, which strips it, and this
+      # runner's own upload-artifact keeps it.
       - uses: actions/download-artifact@v4
         with:
           name: irix-binary
@@ -242,9 +236,8 @@ jobs:
           done
 
 
-  # Everything a MIPS binary can be asserted about from x86: `file` and
-  # `readelf` are target-independent readers, and they run again here against
-  # the artifact rather than the build tree it came from.
+  # `file` and `readelf` are target-independent readers, so the ISA and NEEDED
+  # assertions run again here, against the artifact rather than the build tree.
   package-irix:
     needs: test-irix
     runs-on: ubuntu-24.04
@@ -328,10 +321,9 @@ jobs:
           name: irix-dist
           path: dist
 
-  # Cross-compiled on x86_64 for every Linux target, then the binaries are run
-  # on a real machine of that arch in test-linux. Building in one place keeps
-  # one glibc floor and one toolchain; running elsewhere is what makes a
-  # cross-built artifact worth trusting.
+  # Cross-compiled on x86_64 for both Linux targets, then run on a real machine
+  # of that arch in test-linux. One build host keeps one glibc floor and one
+  # toolchain.
   build-linux:
     needs: preflight
     strategy:
@@ -441,9 +433,8 @@ jobs:
             esac
           done
 
-      # The packaging job runs on a different image and cannot see the
-      # toolchain that produced this, so the facts travel with the binary. The
-      # glibc line is the floor an operator needs and nothing else records it.
+      # The packaging job cannot see the toolchain that produced this, so the
+      # facts travel with the binary. Nothing else records the glibc floor.
       #
       # strip has to happen here for the same reason: the target's binutils are
       # installed on this machine and not on the packaging one. The Linux half
@@ -513,10 +504,9 @@ jobs:
             echo "the built binary does not report $ver"; exit 1
           fi
 
-      # No bundle ships on Linux, so what is under test is that the binary
-      # finds the distribution's own store. The negative control is what makes
-      # that a claim: without it this passes on a build that ignores
-      # SSL_CERT_FILE and never reads a store at all.
+      # No bundle ships on Linux, so this tests that the binary finds the
+      # distribution's own store. Without the negative control it would pass on
+      # a build that reads no store at all.
       - name: TLS selftest
         run: |
           set -euo pipefail
