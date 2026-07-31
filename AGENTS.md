@@ -93,6 +93,8 @@ that skill fails the step by name.
 - **`upload-artifact` keeps the leading path component.** `path: out` uploads
   members named `out/...`, where the reference action strips it, so a
   round trip through `download-artifact` lands one level deeper than you wrote.
+  In a workflow spanning both kinds of runner, that means an artifact's shape
+  depends on which end packed it. Name `path:` on the download.
 
 Beware SIGPIPE under `pipefail`: `cmd | head -1` and `cmd | grep -m1` make the
 producer die of SIGPIPE, which fails the step. Use `sed -n 1p`.

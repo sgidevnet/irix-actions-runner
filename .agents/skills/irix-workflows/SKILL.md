@@ -44,6 +44,11 @@ against the path you gave, so `path: out` produces members named `out/hello`
 where the reference action strips that component. A download with no `path:`
 therefore lands at `out/hello`, and `path: all` lands at `all/out/hello`.
 
+So in a workflow whose jobs span both kinds of runner, an artifact's shape
+depends on which end packed it, and a download written for one is wrong for the
+other. Always name `path:` on the download rather than relying on where the
+members land.
+
 Download's `path:` also gets a single `mkdir`, so `path: all/0` fails with
 `download-artifact: cannot create ...`.
 
