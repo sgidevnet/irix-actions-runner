@@ -41,6 +41,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   `ghcr.io/sgidevnet/irix-worker`. `worker/` holds the build; the IRIX disk
   image is supplied by the operator and is not redistributed here.
 
+- Linux x86_64 and arm64 tarballs, alongside the IRIX one. They need glibc 2.39
+  and OpenSSL 3 from the host and carry no `cert.pem`, because off IRIX the
+  runner reads the distribution's own trust store.
+
+- A cross toolchain for IRIX, published as `ghcr.io/sgidevnet/irix-cross` and
+  built from `contrib/cross/Dockerfile`. The release now compiles every target
+  on Linux and runs the unit tests on hardware of each architecture, an SGI
+  included, before packaging anything.
+
+### Changed
+
+- The IRIX binary is built by clang and LLD rather than SGUG's GCC 9.2, and
+  statically links an OpenSSL 1.1.1w cross-built with the same toolchain rather
+  than SGUG's 1.1.1d. No source changed; `make` on an SGI still uses GCC.
+  MIPSPro remains a portability gate in `make check` and is no longer run by the
+  release.
+
 ### Fixed
 
 - Connecting treated any `poll` return other than 1 as a failure, so a signal
