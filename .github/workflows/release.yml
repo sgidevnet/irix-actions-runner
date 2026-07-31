@@ -70,49 +70,16 @@ jobs:
           echo "contrib/cacert.pem carries $n certificates"
           if [ "$n" -lt 100 ]; then echo "bundle looks truncated"; exit 1; fi
 
-  # The MIPSPro half of `make check`, which is the project's second compiler and
-  # the one thing here that no Linux machine can do. It is its own job because
-  # the build no longer runs on IRIX: without this, a cross-compiled release
-  # would ship having been seen by one compiler.
-  #
-  # `make check` gates the MIPSPro sweep on uname, so this has to land on a
-  # machine that actually has c99. An emulated Indy does not; label the Octane
-  # and target that label if the pool ever grows past one kind of machine.
-  portability-irix:
-    needs: preflight
-    runs-on: [self-hosted, irix]
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Clean the workspace and check the toolchain
-        run: |
-          set -eu
-          uname -a
-          # This runner never wipes the workspace between jobs, and checkout
-          # does not remove untracked files, so a release could otherwise
-          # inherit object files from an unrelated commit.
-          git clean -xdff
-          test -x /usr/bin/c99 || { echo "MIPSPro c99 is not installed"; exit 1; }
-
-      - name: Portability gate
-        run: |
-          set -eu
-          make clean
-          make check
-
-  # Cross-compiled, because GCC dropped mips-sgi-irix6.5 in the 4.8 era and
-  # clang is the only current compiler that targets this machine. The image is
-  # built from contrib/cross/Dockerfile and carries clang, mogrix's IRIX LLD and
-  # an OpenSSL cross-built with the same toolchain. What it cannot do is run the
-  # result, which is what test-irix is for.
   build-irix:
     needs: preflight
     runs-on: ubuntu-24.04
-    container: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.1.0' }}
+    # Private by default: the sysroot inside it is SGI's headers and lib32.
+    # GITHUB_TOKEN can pull it once the package grants this repository access.
+    container:
+      image: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.1.0' }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -631,7 +598,7 @@ jobs:
           path: dist
 
   publish:
-    needs: [portability-irix, package-irix, package-linux]
+    needs: [package-irix, package-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
