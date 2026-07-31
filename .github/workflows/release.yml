@@ -124,16 +124,18 @@ jobs:
           make clean
           make check
 
-      - name: Unit tests
-        run: |
-          set -eu
-          make -j2 test
-
       - name: Build
         run: |
           set -eu
           make -j2
           ls -l build/runner
+
+      # Built here and run in test-irix, so the binaries under test come from
+      # the same toolchain and the same tree as the one being shipped.
+      - name: Build the test binaries
+        run: |
+          set -eu
+          make -j2 tests
 
       - name: The binary is portable to any IRIX 6.5 machine
         run: |
@@ -215,12 +217,17 @@ jobs:
           } > build/BUILD-FACTS
           cat build/BUILD-FACTS
 
+          # The objects are half of build/ and nothing downstream reads them.
+          find build -name '*.o' -o -name '*.d' | xargs rm -f
+          ls -l build
+
+      # One directory, not a list. This runner's upload-artifact takes a single
+      # path and keeps its leading component, so the members are build/... and
+      # a download with no path: lands them back where make test-run looks.
       - uses: actions/upload-artifact@v4
         with:
           name: irix-binary
-          path: |
-            build/runner
-            build/BUILD-FACTS
+          path: build
 
   # A child stage rather than a step inside build-irix, so a test failure is
   # distinguishable from a build failure and neither blocks the Linux half.
@@ -234,11 +241,21 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Run the unit tests on IRIX
+      # Before the download, not after: this runner never wipes the workspace,
+      # and git clean would take the artifact with it.
+      - name: Clean the workspace
         run: |
           set -eu
           git clean -xdff
-          make tests
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: irix-binary
+
+      - name: Run the unit tests on IRIX
+        run: |
+          set -eu
+          chmod 0755 build/test_*
           make test-run
 
   # Everything a MIPS binary can be asserted about from x86: `file` and
@@ -261,8 +278,8 @@ jobs:
           set -euo pipefail
           # download-artifact does not restore Unix modes. 0755 is the intent,
           # not something to preserve.
-          chmod 0755 bin/runner
-          desc=$(file bin/runner)
+          chmod 0755 bin/build/runner
+          desc=$(file bin/build/runner)
           echo "$desc"
           case "$desc" in
             *MIPS-IV*) echo "ISA is MIPS IV; that excludes R4000 and R5000"; exit 1 ;;
@@ -271,13 +288,13 @@ jobs:
           esac
           case "$desc" in *MSB*) ;; *) echo "not big-endian"; exit 1 ;; esac
 
-          needed=$(readelf -d bin/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
+          needed=$(readelf -d bin/build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
           echo "needs $needed"
           if [ "$needed" != "libc.so.1 libm.so libpthread.so " ]; then
             echo "unexpected library dependencies: $needed"; exit 1
           fi
           for bad in libssl libcrypto libz sgug; do
-            if readelf -d bin/runner | grep -q "$bad"; then
+            if readelf -d bin/build/runner | grep -q "$bad"; then
               echo "not self-contained: links $bad"; exit 1
             fi
           done
@@ -290,7 +307,7 @@ jobs:
           rm -rf dist "$name"
           mkdir -p "$name" dist
 
-          cp bin/runner "$name/runner"
+          cp bin/build/runner "$name/runner"
           cp contrib/cacert.pem "$name/cert.pem"
           cp README.md LICENSE CHANGELOG.md "$name/"
           cp man/runner.1 "$name/runner.1"
@@ -303,7 +320,7 @@ jobs:
             echo "commit     $GITHUB_SHA"
             echo "tag        $GITHUB_REF_NAME"
             echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            cat bin/BUILD-FACTS
+            cat bin/build/BUILD-FACTS
             echo "packaged   $(uname -srm)"
             echo "object     $(file "$name/runner")"
             echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"
@@ -440,6 +457,23 @@ jobs:
             esac
           done
 
+      # The packaging job runs on a different image and cannot see the
+      # toolchain that produced this, so the facts travel with the binary. The
+      # glibc line is the floor an operator needs and nothing else records it.
+      - name: Record what built it
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.triple }}" ]; then
+            export CC=${{ matrix.triple }}-gcc
+          fi
+          {
+            echo "built on   $(uname -a)"
+            echo "compiler   $(${CC:-cc} --version | sed -n 1p)"
+            echo "glibc      $(ldd --version | sed -n 1p)"
+            echo "openssl    $(openssl version)"
+          } > build/BUILD-FACTS
+          cat build/BUILD-FACTS
+
       - uses: actions/upload-artifact@v4
         with:
           name: build-linux-${{ matrix.arch }}
@@ -477,8 +511,92 @@ jobs:
           make test-run
           env -i ./build/runner version
 
+      # No bundle ships on Linux, so what is under test is that the binary
+      # finds the distribution's own store. The negative control is what makes
+      # that a claim: without it this passes on a build that ignores
+      # SSL_CERT_FILE and never reads a store at all.
+      - name: TLS works against the system trust store
+        run: |
+          set -euo pipefail
+          if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
+            echo "selftest passed with a nonexistent bundle; this gate proves nothing"
+            exit 1
+          fi
+          echo "negative control ok"
+
+          i=1
+          while [ "$i" -le 3 ]; do
+            if ./build/runner selftest; then break; fi
+            if [ "$i" -eq 3 ]; then echo "selftest failed three times"; exit 1; fi
+            sleep 20
+            i=$((i + 1))
+          done
+
+  # Packaged only after the binary has run on hardware of its own
+  # architecture, and on the machine that has GNU tar rather than the one that
+  # built it, which is the same split build-irix and package-irix use.
+  package-linux:
+    needs: test-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: bin
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          name="irix-actions-runner-$ver-linux-${{ matrix.arch }}"
+          rm -rf dist "$name"
+          mkdir -p "$name" dist
+
+          # download-artifact does not restore Unix modes. 0755 is the intent,
+          # not something to preserve.
+          cp bin/runner "$name/runner"
+          cp README.md LICENSE CHANGELOG.md "$name/"
+          cp man/runner.1 "$name/runner.1"
+          chmod 0755 "$name/runner"
+          chmod 0644 "$name/README.md" "$name/LICENSE" "$name/CHANGELOG.md" \
+              "$name/runner.1"
+
+          {
+            echo "project    $ver"
+            echo "commit     $GITHUB_SHA"
+            echo "tag        $GITHUB_REF_NAME"
+            echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            cat bin/BUILD-FACTS
+            echo "packaged   $(uname -srm)"
+            echo "object     $(file "$name/runner")"
+            echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"
+          } > "$name/BUILD-INFO"
+          chmod 0644 "$name/BUILD-INFO"
+          cat "$name/BUILD-INFO"
+
+          # ustar and a fixed mtime for the same reason as the IRIX tarball:
+          # the same tag produces the same bytes.
+          tar --format=ustar --owner=0 --group=0 --numeric-owner --sort=name \
+              --mtime="@$(git log -1 --format=%ct)" -cf "dist/$name.tar" "$name"
+          gzip -9n "dist/$name.tar"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          cat "dist/$name.tar.gz.sha256"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist-${{ matrix.arch }}
+          path: dist
+
   publish:
-    needs: [package-irix, test-linux]
+    needs: [package-irix, package-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
