@@ -460,12 +460,20 @@ jobs:
       # The packaging job runs on a different image and cannot see the
       # toolchain that produced this, so the facts travel with the binary. The
       # glibc line is the floor an operator needs and nothing else records it.
-      - name: Record what built it
+      #
+      # strip has to happen here for the same reason: the target's binutils are
+      # installed on this machine and not on the packaging one. The Linux half
+      # of CFLAGS carries -g, so an unstripped runner is most of the tarball.
+      - name: Strip, prove it still runs, and record what built it
         run: |
           set -euo pipefail
           if [ -n "${{ matrix.triple }}" ]; then
             export CC=${{ matrix.triple }}-gcc
+            ${{ matrix.triple }}-strip build/runner
+          else
+            strip build/runner
           fi
+          ls -l build/runner
           {
             echo "built on   $(uname -a)"
             echo "compiler   $(${CC:-cc} --version | sed -n 1p)"

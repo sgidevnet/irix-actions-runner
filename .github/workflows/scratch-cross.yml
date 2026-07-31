@@ -75,11 +75,12 @@ jobs:
         \ *) echo \"unexpected dependency: $n\"; exit 1 ;;\n  esac\ndone\nfor want in libssl.so.3 libcrypto.so.3;\
         \ do\n  case \" $needed \" in\n    *\" $want \"*) ;;\n    *) echo \"expected a dynamic $want\"\
         ; exit 1 ;;\n  esac\ndone\n"
-    - name: Record what built it
+    - name: Strip, prove it still runs, and record what built it
       run: "set -euo pipefail\nif [ -n \"${{ matrix.triple }}\" ]; then\n  export CC=${{ matrix.triple\
-        \ }}-gcc\nfi\n{\n  echo \"built on   $(uname -a)\"\n  echo \"compiler   $(${CC:-cc} --version\
-        \ | sed -n 1p)\"\n  echo \"glibc      $(ldd --version | sed -n 1p)\"\n  echo \"openssl    $(openssl\
-        \ version)\"\n} > build/BUILD-FACTS\ncat build/BUILD-FACTS\n"
+        \ }}-gcc\n  ${{ matrix.triple }}-strip build/runner\nelse\n  strip build/runner\nfi\nls -l build/runner\n\
+        {\n  echo \"built on   $(uname -a)\"\n  echo \"compiler   $(${CC:-cc} --version | sed -n 1p)\"\
+        \n  echo \"glibc      $(ldd --version | sed -n 1p)\"\n  echo \"openssl    $(openssl version)\"\
+        \n} > build/BUILD-FACTS\ncat build/BUILD-FACTS\n"
     - uses: actions/upload-artifact@v4
       with:
         name: build-linux-${{ matrix.arch }}
