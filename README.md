@@ -2,275 +2,392 @@
 
 [![ci](https://img.shields.io/github/actions/workflow/status/sgidevnet/irix-actions-runner/ci.yml?label=ci)](https://github.com/sgidevnet/irix-actions-runner/actions/workflows/ci.yml)
 
-A native GitHub Actions self-hosted runner for SGI IRIX 6.5.22 and later. GitHub's official runner is .NET and cannot run there, so this is a clean-room reimplementation of the runner wire protocol in C99. It ships as a single n32 binary whose only dependencies are the IRIX base libraries and a statically linked OpenSSL.
+A native GitHub Actions self-hosted runner for SGI IRIX 6.5.22 and later. It
+runs workflow steps on a real SGI workstation, or in a pool of emulated SGI
+Indys served by a Linux host.
 
-Run it on the SGI itself, or on a Linux host that serves a pool of emulated Indys, one container per job.
+GitHub's runner is written in .NET and cannot run on IRIX. This one is a
+clean-room implementation of the runner protocol in C99. The IRIX release is a
+single n32 MIPS III binary with OpenSSL linked statically.
 
-[irix-actions-figlet-demo](https://github.com/sgidevnet/irix-actions-figlet-demo) is two worked examples: building figlet from upstream, and [ten jobs on ten emulated Indys at once](https://github.com/sgidevnet/irix-actions-figlet-demo/actions/runs/30564803634), which finishes in thirty-two seconds.
-
-`runner help` lists every command and flag. [`man/runner.1`](man/runner.1) carries the defaults, ranges and failure modes that do not fit there, and ships in the tarball as `runner.1`.
-
-## Requirements
-
-| | |
-|---|---|
-| On an SGI | IRIX 6.5.22 or later, on an R4000 or later CPU. The binary is n32, MIPS III |
-| On a Linux host | x86_64 or arm64, glibc 2.39 or newer, OpenSSL 3, and Docker |
-| `run:` steps | nothing beyond base IRIX |
-| `uses:` steps | `git` 2.18+, `zip` and `unzip`, inside the guest |
-
-Built and tested on IRIX 6.5.30m. Earlier 6.5.x releases are expected to work and are untested. The Linux binaries are built on Ubuntu 24.04.
-
-The IRIX tarball carries `cert.pem`, found automatically when it sits next to the binary. `SSL_CERT_FILE` overrides it, and SGUG-RSE's own bundle at `/usr/sgug/etc/pki/tls/cert.pem` is used when neither is present. The Linux tarballs carry no bundle, because the distribution maintains one already.
-
-Configuration is written beside the binary as `.runner`, `.credentials` and `.rsakey`, or one set per identity directory under `--count`.
+[irix-actions-figlet-demo](https://github.com/sgidevnet/irix-actions-figlet-demo)
+builds figlet from upstream on IRIX. It also includes a
+[10-job run on 10 emulated Indys](https://github.com/sgidevnet/irix-actions-figlet-demo/actions/runs/30564803634)
+that completed in 32 seconds.
 
 ## Getting started
 
-You need a GitHub repository or organisation you can administer. On a Linux host you also need Docker, and `serve` needs read and write on `/var/run/docker.sock`, which usually means the `docker` group.
+Choose where the jobs will run:
 
-**1. Install.** Download the tarball for your platform from the [releases page](https://github.com/sgidevnet/irix-actions-runner/releases). Stock IRIX `tar` cannot decompress, so pipe it through `gzip`:
+| Mode | Host requirements | Start command |
+|---|---|---|
+| Real SGI | IRIX 6.5.22 or later, R4000 or later | `runner run` |
+| Emulated pool | Linux x86_64 or arm64, glibc 2.39+, OpenSSL 3, Docker | `runner serve` |
+
+The released IRIX binary is n32 and MIPS III. It is built and tested on IRIX
+6.5.30m. Earlier 6.5.x releases are expected to work, but have not been tested.
+
+The runner itself needs no SGUG-RSE installation. A workflow still needs the
+programs it calls. The native `checkout` handler needs Git 2.18 or later, and
+the artifact handlers need `zip` and `unzip`.
+
+### Run on an SGI
+
+Download the IRIX tarball from the
+[releases page](https://github.com/sgidevnet/irix-actions-runner/releases).
+Stock IRIX `tar` cannot decompress it, so unpack it through `gzip`:
 
 ```sh
-gzip -dc irix-actions-runner-*.tar.gz | tar xvf -
+gzip -dc irix-actions-runner-*-irix6.5-mips-n32.tar.gz | tar xvf -
 cd irix-actions-runner-*
 ```
 
-**2. Check the machine is ready.**
+Check TLS, the certificate bundle, HTTP and the system clock:
 
 ```sh
 ./runner selftest
 ```
 
-This checks TLS, the certificate bundle, HTTP and the clock, and on Linux the Docker socket, and prints what it found. Run it before anything else: a wrong clock and an expired CA bundle are the two things that break a fresh install, and both produce confusing errors later if you skip this.
+Do this before registering. A wrong clock and an expired CA bundle both cause
+confusing failures later. The tarball includes `cert.pem`, which the runner
+finds when it sits beside the binary. `SSL_CERT_FILE` overrides it.
 
-**3. Get a registration token.** In your repository go to Settings, Actions, Runners, New self-hosted runner, and copy the token. Or:
+Get a registration token from Settings, Actions, Runners, New self-hosted
+runner in the repository. From another machine with `gh`, the same token is:
 
 ```sh
 gh api -X POST repos/OWNER/REPO/actions/runners/registration-token --jq .token
 ```
 
-**4. Register.**
+Register once, then leave the runner running:
 
 ```sh
-./runner configure --url https://github.com/OWNER/REPO --token <token>
+./runner configure --url https://github.com/OWNER/REPO --token TOKEN
+./runner run
 ```
 
-**5. Start it.** This is the only step that differs by mode:
+The runner now appears as Online in the repository's Actions settings.
+Configuration is stored beside the binary in `.runner`, `.credentials` and
+`.rsakey`.
 
-| | On an SGI | On a Linux host |
-|---|---|---|
-| step 4 also takes | nothing | `--count 4 --name-prefix irix` |
-| step 5 | `./runner run` | `./runner serve --count 4 --name-prefix irix --image ghcr.io/sgidevnet/irix-worker:0.4.3-indy` |
+### Run a pool of emulated Indys
 
-The runner appears under Settings, Actions, Runners. Leave it running.
+Download the Linux tarball for your host from the
+[releases page](https://github.com/sgidevnet/irix-actions-runner/releases),
+then unpack it:
 
-**Always pass `--image`.** The default is the bare name `irix-worker:latest`, which Docker resolves against Docker Hub, where it does not exist.
+```sh
+tar xzf irix-actions-runner-*-linux-*.tar.gz
+cd irix-actions-runner-*
+./runner selftest
+```
 
-`--count` registers N identities as `irix-0` through `irix-3`, each holding its own `.runner`, `.credentials` and `.rsakey` and each named after its directory. One registration token covers the whole pool, and it is not needed again: every identity authenticates with an RSA key of its own from here on. 64 identities is the ceiling.
+`selftest` checks the Docker socket as well as TLS and HTTP. `serve` needs read
+and write access to `/var/run/docker.sock`, which usually means the account
+must be in the `docker` group.
 
-**Organisation-wide.** `--url` takes an organisation as readily as a repository, with the token from `gh api -X POST orgs/ORG/actions/runners/registration-token`. Add `--runnergroup NAME`; it defaults to `Default`, and getting it wrong is quiet, because the runner registers, shows Online, and is never dispatched to, since the group it landed in has no access to the repository whose workflow is queued.
+Get a registration token as above, then register one identity per concurrent
+job. This example creates four:
 
-**Labels.** Every runner carries `irix`, `mips` and `mips-n32`. `--count` adds `emulated`, so `runs-on: [self-hosted, irix, emulated]` pins a job to the Docker pool and leaving it off does not. `--labels a,b,c` adds your own on top.
+```sh
+./runner configure --url https://github.com/OWNER/REPO --token TOKEN \
+    --count 4 --name-prefix irix
+```
 
-**6. Give it something to do.** Commit this as `.github/workflows/irix.yml`:
+Start the pool:
+
+```sh
+./runner serve --count 4 --name-prefix irix \
+    --image ghcr.io/sgidevnet/irix-worker:0.4.3-indy
+```
+
+Always pass `--image`. The built-in default is `irix-worker:latest`, which
+Docker looks for on Docker Hub, where it does not exist.
+
+`--count 4` creates `irix-0` through `irix-3`. Each directory contains an
+independent runner identity and work directory. One registration token covers
+the whole pool. The token is not needed again after registration because each
+identity authenticates with its own RSA key. The maximum pool size is 64.
+
+Each accepted job gets a fresh container and a restored IRIX guest. The
+published worker image is ready to use. To build a worker image around your
+own IRIX disk, see [`worker/README.md`](worker/README.md).
+
+### Organisation runners
+
+Use the organisation URL and an organisation registration token:
+
+```sh
+gh api -X POST orgs/ORG/actions/runners/registration-token --jq .token
+
+./runner configure --url https://github.com/ORG --token TOKEN \
+    --runnergroup IRIX
+```
+
+Add `--count` and `--name-prefix` to the configure command for an emulated
+pool. `--runnergroup` defaults to `Default`.
+
+A wrong runner group fails quietly: the runner registers and shows Online, but
+GitHub never sends it work because the group cannot access the repository.
+Check the group's repository access in the organisation's Actions settings.
+
+### Runner labels
+
+Every runner carries `irix`, `mips` and `mips-n32`. A pool created with
+`--count` also carries `emulated`:
+
+```yaml
+runs-on: [self-hosted, irix, emulated]
+```
+
+This selects the emulated pool. If work must run on real hardware, configure
+that runner with `--labels hardware` and select it explicitly. `runs-on` has no
+way to exclude a label.
+
+GitHub has no IRIX or MIPS system labels, so the runner also reports the fixed
+system labels `Linux` and `X64`. These values exist only to make GitHub dispatch
+jobs. The `irix`, `mips` and `mips-n32` labels describe the machine.
+
+The `runner.os` context and `RUNNER_OS` environment variable also default to
+`Linux`. `SGUG_RUNNER_OS=IRIX ./runner run` changes them, but third-party
+actions commonly treat an unknown OS as macOS or Windows. The Linux default is
+usually the less harmful branch.
+
+### Run a first workflow
+
+Commit this as `.github/workflows/irix.yml`:
 
 ```yaml
 name: irix
 on: [push, workflow_dispatch]
 
 jobs:
-  build:
+  system:
     runs-on: [self-hosted, irix]
     steps:
-      - uses: actions/checkout@v4
       - run: |
           uname -a
-          make
+          hinv
 ```
 
-To uninstall, `./runner remove --token <token>`, with the same `--count` and `--name-prefix` if you used them.
+Push the commit and open the job in the GitHub Actions UI. Its log should show
+the IRIX release and the SGI hardware inventory.
 
-## Conformance
-
-GitHub resolves `on:`, `needs:`, `strategy`, `permissions`, `concurrency` and job-level `if:` on its own servers. The runner never sees a workflow file, only one fully-resolved job, so its conformance surface is the step, the expression language and the contexts.
-
-| Surface | Conformance |
-|---|---|
-| `${{ }}` expression language | 1015 of 1015 cases in GitHub's own corpus |
-| Expression functions | 11 of 12 |
-| Contexts | 10 of 12 |
-| Step keys | 5 of 11 in full, 5 partial, 1 ignored |
-| Default environment variables | 27 of 44 |
-| `uses:` actions | 3, native |
-| JavaScript and Docker actions | none, and not planned |
-
-The expression figure is GitHub's own cross-language conformance corpus, vendored at [`test/fixtures/expressions`](test/fixtures/expressions) and run by `make test`. Five cases are marked skip by the corpus itself. Fifty-one differ only in case folding above ASCII, because .NET's `OrdinalIgnoreCase` folds the whole of Unicode and this folds ASCII, so `'Ü' == 'ü'` is false where GitHub says true.
-
-**Works**, identically on an SGI and on a Linux host:
-
-- Registration against a repository or an organisation
-- The v2 broker long poll, with mid-session migration
-- `run:` under `bash` and `sh`, with per-step status and timing
-- Live step state and live console output while the job runs
-- Logs of any size, streamed in blocks
-- `${{ }}` in `run:`, `with:` and `if:`
-- `actions/checkout`, `actions/upload-artifact` and `actions/download-artifact`, native, against `git` and `zip`
-- Secret masking, cancellation, prompt shutdown, and resource limits on every step
-
-**Fails the step by name.** `hashFiles()`, the `steps` context, any other `uses:`, and Docker or container steps. You get a named error and the job stops.
-
-**Does nothing, silently.** The list that costs an afternoon:
-
-- An `env:` block never reaches the step's shell, so `$NAME` is empty
-- `::error::`, `::add-mask::` and `::set-output::` print literally
-- No `$GITHUB_ENV`, `$GITHUB_OUTPUT`, `$GITHUB_PATH`, `$GITHUB_STEP_SUMMARY` or `$GITHUB_TOKEN`, so steps cannot pass values to each other or call the REST API
-- `timeout-minutes:` on a step is parsed and ignored. Job-level `timeout-minutes` is server-side and does work
-- A step `id:` arrives and is stored, but nothing can read it without a `steps` context
-
-`chroot` plus a uid drop is implemented, needs root, and is untested.
-
-## Writing workflows
-
-Most workflow YAML works unchanged. Seven things to write differently, and the first four produce no error at all.
-
-| Instead of | Write |
-|---|---|
-| `$NAME` from an `env:` block | The value in the `run:` text. `env:` is readable as `${{ env.NAME }}` but is not exported to the step's shell |
-| `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `::` commands | Nothing. Steps cannot pass values to each other, and no `GITHUB_TOKEN` reaches them |
-| `timeout-minutes:` on a step | Nothing. Every step gets 3600 seconds, and a step that hits that cancels the job |
-| `ref:` on `checkout` | A `run:` step with `git`. `ref:` is read only when `github.sha` is empty, which no real trigger produces |
-| A tool from `/usr/nekoware/bin` or `/usr/freeware/bin` | Extend `PATH` in the step that needs it. It is fixed at `/usr/sgug/bin:/usr/sgug/sbin:/usr/bin:/bin:/usr/sbin:/usr/bsd`, and nothing carries an addition to the next step |
-| A nested `path:` on `checkout` or `download-artifact` | One level. Both `mkdir` exactly once, so `path: all/0` fails |
-| `path: out` on `upload-artifact`, expecting GitHub's layout | It is `zip -r out`, so the members are `out/...` where the reference action strips that component and a download lands one level deeper |
-
-Steps run under `-e`, and bash steps under `-o pipefail`, matching GitHub. Two consequences worth knowing before you hit them. `shell:` only understands `bash` and absolute paths, and any other value falls through to bash, so `shell: python` runs your Python as a shell script. And `cmd | head -1` kills the producer with SIGPIPE, which fails the step, so reach for `sed -n 1p`.
-
-The workspace is never wiped between jobs and `checkout` does not remove untracked files, so run `git clean -xdff` when a clean tree matters. This inverts under `serve`, where every job gets a fresh container.
-
-[`.agents/skills/irix-workflows/`](.agents/skills/irix-workflows) is the full matrix, cited to `file:line`, as an [Agent Skill](https://agentskills.io). Copy the directory into your own repository to give an agent writing workflows there the same rules. `.agents/` is the neutral path; `.claude/skills/`, `.gemini/skills/`, `.opencode/skills/` and `.cursor/skills/` are symlinks into it, because each agent scans its own directory.
-
-JavaScript actions are not planned. V8 dropped its MIPS backends in 2023, and Node sits on libuv, which has no IRIX backend. Run JS steps on a hosted runner and hand the result to IRIX in a separate job.
-
-### Example: cross-build, then verify
-
-Vintage SGI CPUs take hours on a large package where a cross-compiler takes minutes. This shape gives the SGI only the part that has to run on IRIX.
-
-```yaml
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./cross-build.sh          # clang targeting mips-sgi-irix6.5
-      - uses: actions/upload-artifact@v4
-        with: { name: rpms, path: out/ }
-
-  verify:
-    needs: build
-    runs-on: [self-hosted, irix]
-    steps:
-      - uses: actions/download-artifact@v4
-        with: { name: rpms }
-      - run: ./run-tests.sh
-```
-
-## How a job runs
-
-The runtime is split client/server, and one binary is both halves. The server holds the registration and long-polls GitHub for work. The client is the job runtime: it takes one job as a message file, runs the steps and reports. On an SGI both halves are one process. Under `serve` they come apart, and `runner execjob` needs no registration of its own because the job message carries the credentials it reports with.
-
-```mermaid
-flowchart TB
-  subgraph sgi["On an SGI"]
-    direction LR
-    G1[GitHub] -->|long poll| RUN["runner run"] --> SH1["a shell per step"]
-  end
-  subgraph linux["On a Linux host"]
-    direction LR
-    G2[GitHub] -->|long poll| SRV["runner serve"]
-    SRV -->|/job bind mount| CT["container, emulated Indy"]
-    CT --> EX["runner execjob"] --> SH2["a shell per step"]
-  end
-```
-
-`serve` forks one child per identity, each long-polling on its own. A job a child accepts is written to a staging directory under `$TMPDIR`, mode 0700, and bind mounted at `/job` in a fresh container, where the guest restores a snapshot of a booted IRIX rather than cold booting. Ctrl-C or `SIGTERM` forwards to every child once and then waits for all of them, so no identity is left holding a pool session, and a `serve` that starts after an unclean exit reaps the containers its predecessor left behind.
-
-`DOCKER_HOST` overrides the socket path when it names a `unix://` socket; any other form is an error rather than a silent fallback. There is no compose file and no server image.
-
-### What is different under Docker
-
-- **iris decodes MIPS IV** whatever CPU it reports, so a build can pass here and fault on an R4400. Real hardware stays the release gate.
-- **Each job gets a fresh container.** Nothing survives between jobs, and `actions/checkout` re-clones every time.
-- **256 MiB of guest RAM** and roughly one host core per job.
-- **The guest is not a full SGUG-RSE install.** `ghcr.io/sgidevnet/irix-worker:0.4.3-indy` carries `git`, `bash`, `zip` and `unzip` from SGUG plus a Nekoware tree, so `gcc` 3.4.6 and `curl` sit in `/usr/nekoware/bin`, off a step's `PATH`. That `curl` also ships no CA bundle, so an HTTPS fetch needs `--cacert /usr/sgug/etc/pki/tls/certs/ca-bundle.crt`. `git` over HTTPS is unaffected, which is why `checkout` works.
-- **Outbound ping does not work** in a default container. iris opens an unprivileged ICMP socket, which needs `net.ipv4.ping_group_range` to cover the process GID, and Docker's default is `1 0`. Ping to the emulator's own NAT gateway is answered synthetically and still works.
-
-## Runner identity
-
-The machine runs IRIX on big-endian MIPS. The runner reports Linux on x86-64, because GitHub's system labels are a fixed vocabulary with no IRIX or MIPS value and ordinary workflows say `runs-on: [self-hosted, linux, x64]`. A runner describing itself accurately matches nothing.
-
-| Reported | Value sent | Accurate | Consumed by | Effect |
-|---|---|---|---|---|
-| system label | `Linux` | no, it is IRIX | `runs-on` matching | Required |
-| system label | `X64` | no, it is MIPS n32 | `runs-on` matching | Required |
-| user labels | `irix`, `mips`, `mips-n32`, plus your own | yes | `runs-on` matching | Deliberate targeting |
-| `osDescription` | `IRIX 6.5 mips` | yes | runner list in the UI | Display only |
-| `runnerOS`, `os=` | `Linux` | no | nothing | Not validated |
-| `RUNNER_OS` | `Linux` | no, by default | `if:` conditions | Branch selection |
-
-`RUNNER_OS` is the only one worth changing, and it is a flag:
+To unregister, get a fresh registration token and run:
 
 ```sh
-SGUG_RUNNER_OS=IRIX ./runner run
+./runner remove --token TOKEN
 ```
 
-Off by default: when `runner.os == 'Linux'` fails, third-party actions usually fall through to their macOS or Windows branch, which fits IRIX worse.
+For an emulated pool, pass the same `--count` and `--name-prefix` used during
+configuration.
+
+## Workflow support
+
+GitHub resolves triggers, matrices, dependencies, permissions, concurrency and
+job-level conditions before dispatch. This runner receives one resolved job
+and implements its steps.
+
+The following work on both real and emulated IRIX:
+
+- `run:` steps under `bash` or `sh`
+- `${{ }}` expressions in `run:`, `with:` and `if:`
+- `actions/checkout`, implemented against the guest's `git` binary
+- `actions/upload-artifact` and `actions/download-artifact`, implemented with
+  `zip` and `unzip`
+- live step state, live console output and streamed logs
+- secret masking, cancellation and resource limits
+
+The expression evaluator passes all 1,015 active cases in GitHub's own
+cross-language corpus:
+
+```text
+1015 cases, 5 skipped, 51 differing only by unicode case folding
+all expr tests passed
+```
+
+The 51 cases compare non-ASCII letters. GitHub's .NET evaluator folds all of
+Unicode; this runner folds ASCII, so `'Ü' == 'ü'` is false. The corpus and its
+driver live under [`test/fixtures/expressions`](test/fixtures/expressions) and
+[`test/test_expr.c`](test/test_expr.c).
+
+The following fail the step with a named error:
+
+- `hashFiles()` and the `steps` context
+- any `uses:` action other than the three listed above
+- JavaScript actions, Docker actions, container jobs and service containers
+
+JavaScript actions are not planned. Modern V8 has no MIPS backend, and libuv
+has no IRIX backend. Run those steps on a hosted runner and pass their results
+to IRIX as an artifact.
+
+### Silent differences from GitHub's runner
+
+These features do not fail the step, but they do not behave like the official
+runner:
+
+| Feature | What happens | What to do |
+|---|---|---|
+| `env:` | `${{ env.NAME }}` resolves, but `$NAME` is not exported to the shell | Put `${{ env.NAME }}` directly in `run:` |
+| Workflow commands and files | `::error::`, `::add-mask::` and `::set-output::` print literally. There is no `$GITHUB_ENV`, `$GITHUB_OUTPUT`, `$GITHUB_PATH`, `$GITHUB_STEP_SUMMARY` or `$GITHUB_TOKEN` | Keep dependent commands in one `run:` step, or exchange ordinary files in the workspace |
+| Step `timeout-minutes:` | Parsed and ignored. Every step has a 3,600 second local deadline | Use job-level `timeout-minutes`, which GitHub enforces server-side |
+| `checkout` with `ref:` | The handler checks out `github.sha`; `ref` is only used when that value is absent | Check out another revision in a following `git` step |
+| Step `id:` | Stored, but unreadable without the `steps` context | Do not depend on step outputs |
+
+### Shells, paths and workspaces
+
+The step environment is built from scratch. Its `PATH` is:
+
+```text
+/usr/sgug/bin:/usr/sgug/sbin:/usr/bin:/bin:/usr/sbin:/usr/bsd
+```
+
+Nekoware and Freeware are not included. Extend `PATH` inside every step that
+needs one of them. An `env:` block will not export it, and a change made by one
+step does not carry into the next.
+
+The published emulated guest keeps `gcc` 3.4.6 and `curl` under
+`/usr/nekoware/bin`. That `curl` has no bundled trust roots, so HTTPS needs
+`--cacert /usr/sgug/etc/pki/tls/certs/ca-bundle.crt`. Git over HTTPS uses the
+SGUG bundle and works without this flag.
+
+Steps run with `-e`, and bash steps also use `-o pipefail`. A pipeline such as
+`cmd | head -1` can therefore fail when `head` closes the pipe and `cmd` gets
+SIGPIPE. Use `sed -n 1p` when you only need the first line.
+
+`shell:` accepts `bash` and absolute interpreter paths. An unknown name falls
+back to the default shell, so `shell: python` runs the script as shell input.
+
+On real hardware, the workspace remains between jobs and `checkout` does not
+remove untracked files. Run `git clean -xdff` when a clean tree matters. Every
+job under `serve` gets a fresh container, so its workspace starts empty.
+
+### Artifact paths
+
+`checkout` and `download-artifact` create the requested `path:` with one
+`mkdir`, so a nested path such as `all/0` fails unless its parent already
+exists.
+
+`upload-artifact` keeps the leading path component. Uploading `path: out`
+stores `out/...`, while GitHub's action stores only the contents of `out`.
+When an artifact moves between a hosted runner and this runner, set `path:` on
+the download explicitly and check which side created it.
+
+For the complete workflow matrix, including supported inputs and contexts, see
+[`.agents/skills/irix-workflows/`](.agents/skills/irix-workflows). It is an
+[Agent Skill](https://agentskills.io) with every claim linked to source.
+
+## How jobs run
+
+On a real SGI, one process listens for work and executes it:
+
+```text
+GitHub -> runner run -> shell process for each step
+```
+
+On a Linux host, `serve` listens with one process per registered identity. Each
+job starts a fresh worker container, which restores an emulated Indy and runs
+the same runner binary inside IRIX:
+
+```text
+GitHub -> runner serve -> worker container -> emulated IRIX -> runner execjob
+```
+
+The job message is written to a mode 0700 staging directory under `$TMPDIR`
+and mounted into the container at `/job`. It contains the credentials needed
+to report the result, so `execjob` needs no local runner registration.
+
+Ctrl-C and `SIGTERM` are forwarded to every listener. The parent waits for all
+of them so no identity is left holding a GitHub session. After an unclean exit,
+the next `serve` removes containers left by its predecessor.
+
+`DOCKER_HOST` may override `/var/run/docker.sock` with another `unix://`
+socket. TCP Docker endpoints are rejected. There is no compose file and no
+server image.
+
+### Limits of the emulated pool
+
+- Each job gets a fresh container with 256 MiB of guest RAM and roughly one
+  host CPU core.
+- iris executes MIPS IV instructions regardless of the CPU it reports. A build
+  can pass in emulation and fault on an R4000 or R5000. Real hardware is the
+  portability gate.
+- Outbound ping does not work with Docker's default
+  `net.ipv4.ping_group_range`. The emulator's own NAT gateway still answers.
 
 ## Confinement
 
-Limits are applied in the child between fork and exec.
+Every step runs with limits applied before the shell starts:
 
-| Limit | Default | Bounds |
-|---|---|---|
-| step wall clock | 3600 s | a step that stops making progress. Hitting it cancels the job |
-| `--job-timeout` | 14400 s | a wedged emulator under `serve`, which no step limit can reach |
-| `RLIMIT_CPU` | 3600 s | an infinite loop, indistinguishable from a long compile until this fires |
-| `RLIMIT_AS` | 1536 MB | a link step driving the machine into swap |
-| `RLIMIT_FSIZE` | 4096 MB | a runaway writer filling the disk |
-| `RLIMIT_NOFILE` | 512 | descriptor exhaustion |
-| `RLIMIT_CORE` | 0 | a crashing compiler dumping more than the workspace holds |
-| `prctl(PR_MAXPROCS)` | 96 | a fork bomb. IRIX has no `RLIMIT_NPROC` |
-| `prctl(PR_TERMCHILD)` | on | a backgrounded process outliving its job |
+| Limit | Default | Stops |
+|---|---:|---|
+| Step wall clock | 3,600 s | A step that stops making progress |
+| `--job-timeout` under `serve` | 14,400 s | A wedged worker container |
+| `RLIMIT_CPU` | 3,600 s | An infinite loop |
+| `RLIMIT_AS` | 1,536 MB | A link step driving the machine into swap |
+| `RLIMIT_FSIZE` | 4,096 MB | A runaway writer filling the disk |
+| `RLIMIT_NOFILE` | 512 | Descriptor exhaustion |
+| `RLIMIT_CORE` | 0 | Core dumps filling the workspace |
+| `prctl(PR_MAXPROCS)` | 96 | A fork bomb; IRIX has no `RLIMIT_NPROC` |
+| `prctl(PR_TERMCHILD)` | on | A background process outliving its job |
 
-The defaults suit a machine with a couple of gigabytes of RAM. On a smaller one, lower `RLIMIT_AS`.
+These limits contain accidents, not hostile code. On real IRIX there are no
+namespaces, seccomp, jails or network isolation. `chroot` plus a uid drop is
+implemented for a runner started as root, but remains untested. A workflow can
+reach the local network.
 
-This bounds accidents, not adversaries. `chroot` plus an unprivileged uid plus rlimits is the entire toolbox IRIX provides: no namespaces, no seccomp, no jails, no network isolation, so a step can reach the local network. Under `serve` the step runs in an emulated machine inside a container, and the emulator's network is userspace NAT. For untrusted input, use GitHub's fork pull request approval setting under Settings, Actions, General. No local confinement substitutes for it.
+Under `serve`, the job runs inside an emulated machine in a container and uses
+the emulator's userspace NAT. For untrusted pull requests, use GitHub's fork
+approval setting under Settings, Actions, General. Local confinement is not a
+replacement for approval.
 
 ## Building from source
 
-On Linux, `gcc` and `libssl-dev`. The parser output is committed, so there is no generator step:
+On Linux, install a C compiler and the OpenSSL development headers. The parser
+output is committed, so the build does not need Bison:
 
 ```sh
-sudo apt-get install -y libssl-dev
+sudo apt-get install -y gcc libssl-dev
 make
-make test          # unit tests, the same ones that run on IRIX
-```
-
-On an SGI, from [SGUG-RSE](https://github.com/sgidevnet/sgug-rse) 0.0.7beta at `/usr/sgug`, which supplies GCC 9.2 and OpenSSL 1.1.1d:
-
-```sh
-/usr/sgug/bin/sgugshell make
-make check         # MIPSPro c99 compiles every source file
 make test
 ```
 
-`make check` is the portability gate, not a second build: MIPSPro catches the GNU extensions GCC accepts. Neither of these is what ships. Since 0.4.0 the released IRIX binary is cross-compiled on Linux with clang and LLD against a cross-built OpenSSL 1.1.1w, and the release workflow asserts the ISA and the library dependencies before packaging.
+On IRIX, use [SGUG-RSE](https://github.com/sgidevnet/sgug-rse) 0.0.7beta at
+`/usr/sgug`. It supplies GCC 9.2 and OpenSSL 1.1.1d:
 
-[`docs/protocol.md`](docs/protocol.md) records what github.com actually serves, which differs from the published documentation in several places that cost real time to find.
+```sh
+/usr/sgug/bin/sgugshell make
+make check
+make test
+```
+
+`make check` compiles every source file with MIPSPro 7.4.4m. It is a
+portability gate, not another runner build. The released IRIX binary is
+cross-compiled with clang and LLD against OpenSSL 1.1.1w; the release workflow
+also checks its ISA and dynamic library dependencies.
+
+## Command reference
+
+| Command | Purpose |
+|---|---|
+| `runner configure` | Register and write credentials |
+| `runner run` | Listen for jobs and execute them in the current process |
+| `runner serve` | Listen with a Linux pool and run each job in a container |
+| `runner execjob` | Run one job message; used inside the worker guest |
+| `runner status` | Show the configured identity and server details |
+| `runner selftest` | Check TLS, certificates, HTTP, clock and Docker |
+| `runner remove` | Deregister and delete local configuration |
+| `runner version` | Print the runner and protocol versions |
+| `runner help` | Print commands and flags |
+
+[`man/runner.1`](man/runner.1) documents every flag, default, range and failure
+mode. [`docs/protocol.md`](docs/protocol.md) records the protocol GitHub
+actually serves, including where it differs from the published documentation.
 
 ## Why
 
-SGUG-RSE has no way to build and test packages on the hardware it targets. Every surviving SGI machine is locked out of modern CI.
+SGUG-RSE had no way to build and test packages on the hardware it targets.
+Every surviving SGI machine was locked out of modern CI.
 
 ## Authorship
 
