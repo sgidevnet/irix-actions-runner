@@ -18,7 +18,7 @@ ARG OPENSSL_VERSION=1.1.1w
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
-      clang binutils make perl python3 curl ca-certificates git file xz-utils \
+      clang llvm binutils make perl python3 curl ca-certificates git file xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --filter=blob:none https://github.com/unxmaal/mogrix.git /opt/mogrix \

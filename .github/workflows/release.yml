@@ -1,18 +1,19 @@
 name: release
 
-# Builds the shipping binary on IRIX and publishes a draft release.
+# Cross-compiles every target on Linux, runs each binary on hardware of its own
+# architecture, and publishes a draft release.
 #
 # Triggered by pushing a tag. The version is not invented here: it must already
 # agree across the tag, SGUG_PROJECT_VERSION in src/version.h, and a CHANGELOG
-# section, or the run fails before it reaches the IRIX build.
+# section, or the run fails before it reaches any build.
 #
-# Two constraints shape every step in `build-irix`, both from this runner, and
-# neither applies to `build-linux`:
+# Two constraints shape every step in `test-irix`, both from this runner, and
+# neither applies anywhere else:
 #
 #   1. There is no expression evaluator, so `${{ }}` is unusable there. In a
-#      `run:` body it is now a hard error; in a `with:` value it silently reads
-#      as absent. Use the $GITHUB_* shell variables instead. `build-linux` is on
-#      hosted runners and reads `${{ matrix.* }}` normally.
+#      `run:` body it is a hard error; in a `with:` value it silently reads as
+#      absent. Use the $GITHUB_* shell variables instead. Every other job is on
+#      a hosted runner and reads `${{ matrix.* }}` normally.
 #   2. No GITHUB_TOKEN reaches steps, so IRIX cannot call the REST API. The
 #      release itself is created from a hosted runner.
 #
@@ -73,7 +74,7 @@ jobs:
   build-irix:
     needs: preflight
     runs-on: ubuntu-24.04
-    container: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.1.0' }}
+    container: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.2.0' }}
     timeout-minutes: 30
     # Named, not inherited. bash is in the image, but the runner's probe picked
     # sh for the container and dash has no pipefail, so every step died on its
@@ -102,8 +103,9 @@ jobs:
           fi
           echo "building $ver from $GITHUB_SHA"
 
-      # The %z grep half. The MIPSPro half is portability-irix's job; this
-      # target skips it off IRIX and says so.
+      # The %z grep half. `make check` gates its MIPSPro sweep on uname and says
+      # so when it skips; that compiler lives only on an SGI, and a release does
+      # not need one to prove the binary works.
       - name: Portability gate
         run: |
           set -euo pipefail
@@ -144,9 +146,14 @@ jobs:
             fi
           done
 
-      - name: Record what built it
+      # llvm-strip, not strip: binutils on x86 has no MIPS BFD target, but LLVM's
+      # reads this file happily. SGUG's own strip dies with SIGILL on an
+      # LLD-produced binary, so IRIX is the wrong place for this anyway.
+      - name: Strip and record what built it
         run: |
           set -euo pipefail
+          llvm-strip build/runner
+          ls -l build/runner
           {
             echo "built on   $(uname -a) (cross)"
             echo "compiler   $(clang --version | sed -n 1p)"
@@ -162,8 +169,8 @@ jobs:
           path: build
 
   # The only machine that can say whether the cross build works. Nothing here
-  # compiles: it runs what build-irix produced, and strips it, because binutils
-  # on x86 has no MIPS BFD target and refuses the file outright.
+  # compiles or rewrites: it runs exactly the stripped binary that will ship,
+  # which is what makes the selftest below evidence rather than a smoke test.
   test-irix:
     needs: build-irix
     runs-on: [self-hosted, irix]
@@ -234,23 +241,10 @@ jobs:
             i=$((i + 1))
           done
 
-      - name: Strip, and prove it still runs
-        run: |
-          set -eu
-          strip build/runner
-          ls -l build/runner
-          env -i ./build/runner version
-          rm -f build/test_*
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: irix-stripped
-          path: build
-
 
   # Everything a MIPS binary can be asserted about from x86: `file` and
-  # `readelf` are target-independent readers. `strip` is not, which is why it
-  # stays on IRIX; binutils here has no MIPS BFD target and refuses the file.
+  # `readelf` are target-independent readers, and they run again here against
+  # the artifact rather than the build tree it came from.
   package-irix:
     needs: test-irix
     runs-on: ubuntu-24.04
@@ -260,7 +254,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: irix-stripped
+          name: irix-binary
           path: bin
 
       - name: The binary is portable to any IRIX 6.5 machine
@@ -268,8 +262,8 @@ jobs:
           set -euo pipefail
           # download-artifact does not restore Unix modes. 0755 is the intent,
           # not something to preserve.
-          chmod 0755 bin/build/runner
-          desc=$(file bin/build/runner)
+          chmod 0755 bin/runner
+          desc=$(file bin/runner)
           echo "$desc"
           case "$desc" in
             *MIPS-IV*) echo "ISA is MIPS IV; that excludes R4000 and R5000"; exit 1 ;;
@@ -278,13 +272,13 @@ jobs:
           esac
           case "$desc" in *MSB*) ;; *) echo "not big-endian"; exit 1 ;; esac
 
-          needed=$(readelf -d bin/build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
+          needed=$(readelf -d bin/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
           echo "needs $needed"
           if [ "$needed" != "libc.so.1 libm.so libpthread.so " ]; then
             echo "unexpected library dependencies: $needed"; exit 1
           fi
           for bad in libssl libcrypto libz sgug; do
-            if readelf -d bin/build/runner | grep -q "$bad"; then
+            if readelf -d bin/runner | grep -q "$bad"; then
               echo "not self-contained: links $bad"; exit 1
             fi
           done
@@ -297,7 +291,7 @@ jobs:
           rm -rf dist "$name"
           mkdir -p "$name" dist
 
-          cp bin/build/runner "$name/runner"
+          cp bin/runner "$name/runner"
           cp contrib/cacert.pem "$name/cert.pem"
           cp README.md LICENSE CHANGELOG.md "$name/"
           cp man/runner.1 "$name/runner.1"
@@ -310,7 +304,7 @@ jobs:
             echo "commit     $GITHUB_SHA"
             echo "tag        $GITHUB_REF_NAME"
             echo "run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            cat bin/build/BUILD-FACTS
+            cat bin/BUILD-FACTS
             echo "packaged   $(uname -srm)"
             echo "object     $(file "$name/runner")"
             echo "needs      $(readelf -d "$name/runner" | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | tr '\n' ' ')"

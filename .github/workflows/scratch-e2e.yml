@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-irix:
     runs-on: ubuntu-24.04
-    container: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.1.0' }}
+    container: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.2.0' }}
     timeout-minutes: 30
     defaults:
       run:
@@ -61,11 +61,12 @@ jobs:
         \ \" ]; then\n  echo \"unexpected library dependencies: $needed\"; exit 1\nfi\nfor bad in libssl\
         \ libcrypto libz sgug; do\n  if readelf -d build/runner | grep -q \"$bad\"; then\n    echo \"\
         not self-contained: links $bad\"; exit 1\n  fi\ndone\n"
-    - name: Record what built it
-      run: "set -euo pipefail\n{\n  echo \"built on   $(uname -a) (cross)\"\n  echo \"compiler   $(clang\
-        \ --version | sed -n 1p)\"\n  echo \"linker     $(basename \"$IRIX_LLD\")\"\n  echo \"openssl\
-        \    $(strings -a build/runner | grep '^OpenSSL 1\\.' | sed -n 1p)\"\n} > build/BUILD-FACTS\n\
-        cat build/BUILD-FACTS\nfind build \\( -name '*.o' -o -name '*.d' \\) -delete\n"
+    - name: Strip and record what built it
+      run: "set -euo pipefail\nllvm-strip build/runner\nls -l build/runner\n{\n  echo \"built on   $(uname\
+        \ -a) (cross)\"\n  echo \"compiler   $(clang --version | sed -n 1p)\"\n  echo \"linker     $(basename\
+        \ \"$IRIX_LLD\")\"\n  echo \"openssl    $(strings -a build/runner | grep '^OpenSSL 1\\.' | sed\
+        \ -n 1p)\"\n} > build/BUILD-FACTS\ncat build/BUILD-FACTS\nfind build \\( -name '*.o' -o -name\
+        \ '*.d' \\) -delete\n"
     - uses: actions/upload-artifact@v4
       with:
         name: irix-binary
@@ -115,22 +116,6 @@ jobs:
         \ 1\nfi\necho \"negative control ok\"\n\ni=1\nwhile [ \"$i\" -le 3 ]; do\n  if SSL_CERT_FILE=\"\
         $ca\" ./build/runner selftest; then break; fi\n  if [ \"$i\" -eq 3 ]; then echo \"selftest failed\
         \ three times\"; exit 1; fi\n  sleep 20\n  i=$((i + 1))\ndone\n"
-    - name: Strip, and prove it still runs
-      run: 'set -eu
-
-        strip build/runner
-
-        ls -l build/runner
-
-        env -i ./build/runner version
-
-        rm -f build/test_*
-
-        '
-    - uses: actions/upload-artifact@v4
-      with:
-        name: irix-stripped
-        path: build
   package-irix:
     needs: test-irix
     runs-on: ubuntu-24.04
@@ -139,33 +124,33 @@ jobs:
     - uses: actions/checkout@v4
     - uses: actions/download-artifact@v4
       with:
-        name: irix-stripped
+        name: irix-binary
         path: bin
     - name: The binary is portable to any IRIX 6.5 machine
       run: "set -euo pipefail\n# download-artifact does not restore Unix modes. 0755 is the intent,\n\
-        # not something to preserve.\nchmod 0755 bin/build/runner\ndesc=$(file bin/build/runner)\necho\
-        \ \"$desc\"\ncase \"$desc\" in\n  *MIPS-IV*) echo \"ISA is MIPS IV; that excludes R4000 and R5000\"\
-        ; exit 1 ;;\n  *N32*MIPS-III*) ;;\n  *) echo \"expected an N32 MIPS-III object\"; exit 1 ;;\n\
-        esac\ncase \"$desc\" in *MSB*) ;; *) echo \"not big-endian\"; exit 1 ;; esac\n\nneeded=$(readelf\
-        \ -d bin/build/runner | sed -n 's/.*NEEDED.*\\[\\(.*\\)\\].*/\\1/p' | sort | tr '\\n' ' ')\necho\
-        \ \"needs $needed\"\nif [ \"$needed\" != \"libc.so.1 libm.so libpthread.so \" ]; then\n  echo\
-        \ \"unexpected library dependencies: $needed\"; exit 1\nfi\nfor bad in libssl libcrypto libz sgug;\
-        \ do\n  if readelf -d bin/build/runner | grep -q \"$bad\"; then\n    echo \"not self-contained:\
-        \ links $bad\"; exit 1\n  fi\ndone\n"
+        # not something to preserve.\nchmod 0755 bin/runner\ndesc=$(file bin/runner)\necho \"$desc\"\n\
+        case \"$desc\" in\n  *MIPS-IV*) echo \"ISA is MIPS IV; that excludes R4000 and R5000\"; exit 1\
+        \ ;;\n  *N32*MIPS-III*) ;;\n  *) echo \"expected an N32 MIPS-III object\"; exit 1 ;;\nesac\ncase\
+        \ \"$desc\" in *MSB*) ;; *) echo \"not big-endian\"; exit 1 ;; esac\n\nneeded=$(readelf -d bin/runner\
+        \ | sed -n 's/.*NEEDED.*\\[\\(.*\\)\\].*/\\1/p' | sort | tr '\\n' ' ')\necho \"needs $needed\"\
+        \nif [ \"$needed\" != \"libc.so.1 libm.so libpthread.so \" ]; then\n  echo \"unexpected library\
+        \ dependencies: $needed\"; exit 1\nfi\nfor bad in libssl libcrypto libz sgug; do\n  if readelf\
+        \ -d bin/runner | grep -q \"$bad\"; then\n    echo \"not self-contained: links $bad\"; exit 1\n\
+        \  fi\ndone\n"
     - name: Package
       run: "set -euo pipefail\nver=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*\"\\\
         (.*\\)\".*/\\1/p' src/version.h)\nname=\"irix-actions-runner-$ver-irix6.5-mips-n32\"\nrm -rf dist\
-        \ \"$name\"\nmkdir -p \"$name\" dist\n\ncp bin/build/runner \"$name/runner\"\ncp contrib/cacert.pem\
+        \ \"$name\"\nmkdir -p \"$name\" dist\n\ncp bin/runner \"$name/runner\"\ncp contrib/cacert.pem\
         \ \"$name/cert.pem\"\ncp README.md LICENSE CHANGELOG.md \"$name/\"\ncp man/runner.1 \"$name/runner.1\"\
         \nchmod 0755 \"$name/runner\"\nchmod 0644 \"$name/cert.pem\" \"$name/README.md\" \"$name/LICENSE\"\
         \ \\\n    \"$name/CHANGELOG.md\" \"$name/runner.1\"\n\n{\n  echo \"project    $ver\"\n  echo \"\
         commit     $GITHUB_SHA\"\n  echo \"tag        $GITHUB_REF_NAME\"\n  echo \"run        $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\
-        \n  cat bin/build/BUILD-FACTS\n  echo \"packaged   $(uname -srm)\"\n  echo \"object     $(file\
-        \ \"$name/runner\")\"\n  echo \"needs      $(readelf -d \"$name/runner\" | sed -n 's/.*NEEDED.*\\\
-        [\\(.*\\)\\].*/\\1/p' | tr '\\n' ' ')\"\n  echo \"ca bundle  $(sed -n 's/^## Certificate data\
-        \ from Mozilla as of: //p' contrib/cacert.pem)\"\n} > \"$name/BUILD-INFO\"\nchmod 0644 \"$name/BUILD-INFO\"\
-        \ncat \"$name/BUILD-INFO\"\n\n# ustar because stock IRIX tar understands nothing newer, and it\
-        \ has\n# no -z either, hence the separate gzip. Sorted with a fixed mtime so\n# the same tag produces\
+        \n  cat bin/BUILD-FACTS\n  echo \"packaged   $(uname -srm)\"\n  echo \"object     $(file \"$name/runner\"\
+        )\"\n  echo \"needs      $(readelf -d \"$name/runner\" | sed -n 's/.*NEEDED.*\\[\\(.*\\)\\].*/\\\
+        1/p' | tr '\\n' ' ')\"\n  echo \"ca bundle  $(sed -n 's/^## Certificate data from Mozilla as of:\
+        \ //p' contrib/cacert.pem)\"\n} > \"$name/BUILD-INFO\"\nchmod 0644 \"$name/BUILD-INFO\"\ncat \"\
+        $name/BUILD-INFO\"\n\n# ustar because stock IRIX tar understands nothing newer, and it has\n#\
+        \ no -z either, hence the separate gzip. Sorted with a fixed mtime so\n# the same tag produces\
         \ the same bytes.\ntar --format=ustar --owner=0 --group=0 --numeric-owner --sort=name \\\n   \
         \ --mtime=\"@$(git log -1 --format=%ct)\" -cf \"dist/$name.tar\" \"$name\"\ngzip -9n \"dist/$name.tar\"\
         \n(cd dist && sha256sum \"$name.tar.gz\" > \"$name.tar.gz.sha256\")\ncat \"dist/$name.tar.gz.sha256\"\
