@@ -90,6 +90,7 @@ jobs:
     - uses: actions/download-artifact@v4
       with:
         name: irix-binary
+        path: build
     - name: Run the unit tests on IRIX
       run: 'set -eu
 

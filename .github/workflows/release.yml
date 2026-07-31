@@ -181,9 +181,15 @@ jobs:
           set -eu
           git clean -xdff
 
+      # path: build, because the two ends disagree about the leading component.
+      # build-irix is on a hosted runner, so `path: build` there uploads the
+      # contents and the members arrive named runner, test_json and so on. This
+      # runner's own upload-artifact would have kept the build/ prefix. Naming
+      # the destination is what makes make test-run find them either way.
       - uses: actions/download-artifact@v4
         with:
           name: irix-binary
+          path: build
 
       - name: Run the unit tests on IRIX
         run: |
