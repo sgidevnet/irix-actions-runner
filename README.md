@@ -258,6 +258,9 @@ flowchart LR
   GH -->|Dispatches job| SERVE
 ```
 
+Virtualized Indys run on [iris](https://github.com/techomancer/iris),
+techomancer's SGI Indy emulator.
+
 `serve`:
 
 - Runs one listener per identity.
