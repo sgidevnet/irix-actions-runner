@@ -6,11 +6,16 @@ UNAME_S := $(shell uname -s)
 # and a dynamic OpenSSL and failed on the first header.
 IS_IRIX := $(filter IRIX IRIX64,$(UNAME_S))
 
+# Cross-compiling for IRIX from a Linux host. uname reports the host, so the
+# toolchain announces itself instead: IRIX_SYSROOT is set by the image that
+# carries clang, mogrix's IRIX linker and a cross-built OpenSSL.
+CROSS_IRIX := $(if $(IRIX_SYSROOT),1,)
+
 BUILD   := build
 
 # src/serve/ is host-only. Excluded here rather than behind an #if, which would
 # leave MIPSPro an empty translation unit; ISO C forbids that.
-ifneq ($(IS_IRIX),)
+ifneq ($(IS_IRIX)$(CROSS_IRIX),)
 PLATFORM_SRCS :=
 else
 PLATFORM_SRCS := $(wildcard src/serve/*.c)
@@ -28,7 +33,27 @@ TEST_BINS := $(TEST_SRCS:test/%.c=$(BUILD)/%)
 
 WARNS   := -Wall -Wextra -Wno-unused-parameter
 
-ifneq ($(IS_IRIX),)
+ifneq ($(CROSS_IRIX),)
+# Cross build, producing the same n32 MIPS-III binary the IRIX branch does.
+# GCC dropped mips-sgi-irix6.5 in the 4.8 era, so clang is the only current
+# compiler that targets this; irix-cc wraps it with the ABI flags and the
+# header shims that stand in for MIPSPro builtins.
+MOGRIX  ?= /opt/mogrix
+CC      := $(MOGRIX)/cross/bin/irix-cc
+# No -mips3 or -mabi=n32 here: irix-cc sets the ABI itself, and passing the GCC
+# spellings on top makes clang reject the command line.
+CFLAGS  := -std=c99 -O2 $(WARNS) -I$(IRIX_OPENSSL)/include -Isrc
+# OpenSSL is cross-built with this same toolchain rather than taken from
+# SGUG-RSE. LLD cannot read SGUG's archives at all: GNU as emits STB_LOCAL
+# symbols past sh_info and LLD rejects the object outright.
+#
+# -lpthread, not -pthread. The IRIX branch's rule is about GCC's driver spec;
+# here irix-cc hands the link to LLD directly, which has no spec to expand and
+# silently drops -pthread.
+LIBS    := $(IRIX_OPENSSL)/lib/libssl.a $(IRIX_OPENSSL)/lib/libcrypto.a \
+           -lpthread -lm
+LDFLAGS :=
+else ifneq ($(IS_IRIX),)
 SGUG    := /usr/sgug
 CC      := $(SGUG)/bin/gcc
 # -Isrc must precede the SGUG include dir. SGUG ships JsonCpp at
@@ -110,7 +135,11 @@ endif
 # executes on another machine.
 tests: $(TEST_BINS)
 
-test: tests test-run
+# A recipe, not `test: tests test-run`. Prerequisites of a phony target are
+# unordered, so under -j the run starts before the binaries exist and fails
+# claiming they were never built.
+test: tests
+	@$(MAKE) --no-print-directory test-run
 
 # Runs test binaries that already exist, so a machine that cannot build them
 # can still be the one that executes them. The release cross-compiles on Linux
