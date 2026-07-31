@@ -179,6 +179,18 @@ jobs:
 
       # Before the download, not after: this runner never wipes the workspace,
       # and git clean would take the artifact with it.
+      # Proof that an SGI ran this, not the emulator's host or a mislabelled
+      # runner. hinv is in /sbin, which is not on every PATH.
+      - name: Machine
+        run: |
+          set -eu
+          uname -a
+          if command -v hinv >/dev/null 2>&1; then
+            hinv | sed -n 1,8p
+          else
+            /sbin/hinv | sed -n 1,8p
+          fi
+
       - name: Clean
         run: |
           set -eu
@@ -641,25 +653,26 @@ jobs:
           Native GitHub Actions runner for SGI IRIX, and for the Linux hosts
           that dispatch jobs to emulated Indys.
 
-          **IRIX 6.5.22 and later**, MIPS n32, on an R4000 or later CPU. The
-          binary needs only `libc.so.1`, `libpthread.so` and `libm.so`, all
-          IRIX base. `cert.pem` ships alongside it and is found automatically;
-          no SGUG-RSE needed to run. `git`, `zip` and `unzip` are needed only
-          for `uses:` steps. Stock IRIX `tar` cannot decompress, so extract
-          with:
+          **IRIX 6.5.22 and later**, MIPS n32, on an R4000 or later CPU. Needs
+          only `libc.so.1`, `libpthread.so` and `libm.so`, all IRIX base.
+          `cert.pem` ships alongside and is found automatically, so SGUG-RSE is
+          not needed to run. `git`, `zip` and `unzip` are needed only for
+          `uses:` steps. Stock IRIX `tar` cannot decompress:
 
               gzip -dc irix-actions-runner-*.tar.gz | tar xvf -
 
-          **Linux x86_64 and arm64**, built on Ubuntu 24.04. Needs glibc 2.39
-          and OpenSSL 3 from the host, and Docker for `runner serve`. No
-          `cert.pem` ships; `SSL_CERT_FILE` overrides the system trust store.
+          **Linux x86_64 and arm64.** glibc 2.39 and OpenSSL 3 from the host,
+          Docker for `runner serve`. No `cert.pem` ships; `SSL_CERT_FILE`
+          overrides the system trust store.
 
-          Built and tested on IRIX 6.5.30m. Earlier 6.5.x releases and other SGI
-          models are expected to work and are untested. See `BUILD-INFO` in each
-          tarball for exactly what was built and on what.
+          Every target is cross-compiled on Ubuntu 24.04, and its unit tests run
+          on hardware of that architecture before packaging. The IRIX binary is
+          tested on 6.5.22. Other 6.5.x releases and other SGI models are
+          untested. `BUILD-INFO` in each tarball records the compiler, linker
+          and OpenSSL that produced it.
 
-          If the first connection fails, run `./runner selftest`: an undisciplined
-          clock and an expired CA bundle are the two usual causes.
+          If the first connection fails, run `./runner selftest`. A wrong clock
+          and an expired CA bundle are the two usual causes.
 
           PREAMBLE
           cat body.md >> notes.md

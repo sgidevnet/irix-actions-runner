@@ -6,35 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.4.0-rc1] - 2026-07-31
+
 ### Added
 
 - `runner execjob --message FILE --name NAME --work DIR` runs a single job from
-  a message file, with no configured runner present. It reads no `.runner`,
-  `.credentials` or `.rsakey`: everything a job needs is already in the
-  message.
+  a message file with no configured runner present. It reads no `.runner`,
+  `.credentials` or `.rsakey`: everything a job needs is in the message.
+
 - `--cancel-file PATH` on `execjob` stops a running job when that file's mtime
-  changes. `SIGINT` and `SIGTERM` now cancel the job rather than killing the
+  changes. `SIGINT` and `SIGTERM` cancel the job rather than killing the
   process, so it still reports a result.
-- `runner configure --count N --name-prefix P` registers N runner identities
-  into `P-0`, `P-1`, ..., each with its own `.runner`, `.credentials`, `.rsakey`
-  and work folder, and each carrying an `emulated` label beyond the usual three.
-  `runner run --dir DIR` and `runner status --dir DIR` select one of them;
+
+- `runner configure --count N --name-prefix P` registers N identities as
+  `P-0`, `P-1`, and so on, each with its own `.runner`, `.credentials`,
+  `.rsakey` and work folder, and each carrying an `emulated` label beyond the
+  usual three. `runner run --dir DIR` and `runner status --dir DIR` select one;
   `runner remove --count N --name-prefix P` deregisters all of them and keeps
   going past a failure.
+
 - `runner serve` forks one listener per configured identity and runs each job
-  in an ephemeral worker container instead of executing it locally. Linux host
-  only. The parent forwards `SIGTERM` to every child and waits for it, so no
-  pool session is left behind for the next start to retry past.
-  `--image` picks the worker image and `--job-timeout` the wall clock a job
-  gets, which is the only bound on a wedged emulator.
+  in an ephemeral worker container rather than locally. Linux host only. The
+  parent forwards `SIGTERM` to every child and waits, so no pool session is
+  left for the next start to retry past. `--image` picks the worker image and
+  `--job-timeout` the wall clock a job gets, which is the only bound on a
+  wedged emulator.
+
 - `serve` sends `completejob` itself when a worker container dies without the
   guest having reported. Nothing renews a job lock, so an unreported job
-  otherwise leaves that identity online, at `currentParallelism: 1` and never
+  otherwise leaves that identity online at `currentParallelism: 1` and never
   dispatched to again. A guest that did report writes `complete` into its
-  staging directory, and the fallback stands down.
-- `selftest` reports the Docker daemon's version on a Linux host, and the reason
-  its socket could not be reached when it could not. `serve` does not touch the
-  daemon until a job has been acquired, so a `docker` group problem otherwise
+  staging directory and the fallback stands down.
+
+- `selftest` reports the Docker daemon's version on a Linux host, and why its
+  socket could not be reached when it could not. `serve` does not touch the
+  daemon until a job is acquired, so a `docker` group problem otherwise
   surfaces one dispatched and failed job at a time.
 
 - A worker image that runs a job inside an emulated SGI Indy, published as
@@ -46,22 +52,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   runner reads the distribution's own trust store.
 
 - A cross toolchain for IRIX, published as `ghcr.io/sgidevnet/irix-cross` and
-  built from `contrib/cross/Dockerfile`. The release now compiles every target
-  on Linux and runs the unit tests on hardware of each architecture, an SGI
-  included, before packaging anything.
+  built from `contrib/cross/Dockerfile`.
 
 ### Changed
 
+- The release cross-compiles every target on Linux and runs each binary's unit
+  tests on hardware of its own architecture, an SGI included, before packaging.
+  An IRIX build no longer needs an SGI; a release still does, to test one.
+
 - The IRIX binary is built by clang and LLD rather than SGUG's GCC 9.2, and
   statically links an OpenSSL 1.1.1w cross-built with the same toolchain rather
-  than SGUG's 1.1.1d. No source changed; `make` on an SGI still uses GCC.
-  MIPSPro remains a portability gate in `make check` and is no longer run by the
-  release.
+  than SGUG's 1.1.1d. No source changed, and `make` on an SGI still uses GCC.
+  MIPSPro remains a portability gate in `make check`; the release no longer
+  runs it.
 
 ### Fixed
 
 - Connecting treated any `poll` return other than 1 as a failure, so a signal
   arriving during `connect` failed the connection.
+
+- The job lease was never renewed, so the run service dropped any job longer
+  than ten minutes and `completejob` answered 404.
+
+- `make -j test` raced. Prerequisites of a phony target are unordered, so the
+  run started before the binaries were built.
 
 ## [0.3.0] - 2026-07-28
 
