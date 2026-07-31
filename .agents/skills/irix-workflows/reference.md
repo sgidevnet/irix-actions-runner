@@ -1,8 +1,15 @@
 # Support matrix
 
-Every row cites the source that decides it, relative to the runner repository.
-`SKILL.md` is the working summary; this is the thing to check when the summary
-does not answer the question.
+Runner behaviour cites the source that decides it. External worker and emulator
+facts cite the repository document that records them. `SKILL.md` is the working
+summary; check this file when it does not answer the question.
+
+Sections: [`uses:` handlers](#uses-handlers),
+[expressions](#expression-functions), [contexts](#contexts),
+[step environment](#step-environment), [workflow commands](#workflow-commands),
+[shell](#shell), [limits](#timeouts-and-limits),
+[job semantics](#job-and-step-semantics), and
+[virtualized workers](#virtualized-workers).
 
 ## `uses:` handlers
 
@@ -71,6 +78,12 @@ marked unsupported at `job.c:104-108` and fails at `runjob.c:480` with
 `container and docker steps cannot run on IRIX: there is no container runtime`.
 
 ## Expression functions
+
+Step `name:` tokens are evaluated before the timeline record is posted. A bad
+expression keeps the literal name and does not fail the job
+(`src/exec/runjob.c:330-345`). `if:` is evaluated at `runjob.c:376-401`;
+`run:`, `shell:` and `working-directory:` at `runjob.c:416-444`; every action
+`with:` value at `runjob.c:198-250` and `runjob.c:469-475`.
 
 Arity table `src/expr/eval.c:813-824`, dispatch `eval.c:858-1043`.
 
@@ -165,6 +178,22 @@ Absent everywhere in `src/`: `GITHUB_ENV`, `GITHUB_OUTPUT`, `GITHUB_PATH`,
 `env:` blocks are never exported. `build_env` reads neither the message's
 `environmentVariables` nor `step->env`; both are reachable only through
 `${{ env.NAME }}`.
+
+## Virtualized workers
+
+The published Indy worker puts `gcc` and `curl` in `/usr/nekoware/bin`, outside
+the fixed `PATH`. Extend `PATH` in each step that needs them. Its `curl` also
+needs `--cacert /usr/sgug/etc/pki/tls/certs/ca-bundle.crt` for HTTPS
+(`README.md:219-222`).
+
+iris executes MIPS IV instructions regardless of the emulated CPU. A build can
+pass under `runner serve` and fault on an R4000 or R5000. Treat real hardware as
+the portability gate (`README.md:281-283`); the shipping build deliberately
+uses `-mips3` (`Makefile:62-66`).
+
+Outbound `ping` depends on the Docker host's `net.ipv4.ping_group_range`; the
+emulator's NAT gateway still answers without it. Do not use `ping` as the
+internet reachability test (`README.md:285-286`).
 
 ## Workflow commands
 
