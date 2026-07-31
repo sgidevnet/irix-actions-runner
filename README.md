@@ -240,16 +240,22 @@ under `serve` always get a fresh container.
 
 ## How it works
 
-Real hardware:
+```mermaid
+flowchart LR
+  GH[GitHub]
 
-```text
-GitHub -> runner run -> shell process for each step
-```
+  subgraph hardware[Real SGI]
+    RUN[runner run] --> SHELL1[Shell per step]
+  end
 
-Virtualized pool:
+  subgraph pool[Linux-hosted pool]
+    SERVE[runner serve] -->|Starts per job| CONTAINER[Worker container]
+    CONTAINER --> IRIX[Virtualized IRIX]
+    IRIX --> EXEC[runner execjob] --> SHELL2[Shell per step]
+  end
 
-```text
-GitHub -> runner serve -> worker container -> virtualized IRIX -> runner execjob
+  GH -->|Dispatches job| RUN
+  GH -->|Dispatches job| SERVE
 ```
 
 `serve`:
