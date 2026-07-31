@@ -98,3 +98,7 @@ ENV IRIX_OPENSSL=/opt/irix-openssl
 # executables. It has no source in the tree, and the runner has been fine on
 # libc malloc since it existed, so the link skips it.
 ENV MOGRIX_NO_DLMALLOC=1
+
+# Links the package to the repository, which is what lets that repository's
+# GITHUB_TOKEN pull it while the package stays private.
+LABEL org.opencontainers.image.source=https://github.com/sgidevnet/irix-actions-runner
