@@ -352,10 +352,17 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           if [ -n "${{ matrix.triple }}" ]; then
-            # OpenSSL for the target arch comes from ports, which the default
-            # sources do not carry. Restricting the existing sources to amd64
-            # first stops apt trying to fetch every repo for arm64 and failing.
-            sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            # OpenSSL for the target arch comes from ports; archive and
+            # security carry amd64 only, and apt fails the whole update on a
+            # 404 for one index. So pin the stock sources to amd64 before
+            # adding the architecture. 24.04 uses deb822, older images the
+            # one-line format, hence both.
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              sudo sed -i '/^Types:/a Architectures: amd64' \
+                /etc/apt/sources.list.d/ubuntu.sources
+            fi
+            sudo sed -i 's/^deb \([^[]\)/deb [arch=amd64] \1/' \
+              /etc/apt/sources.list 2>/dev/null || true
             sudo dpkg --add-architecture arm64
             sudo tee /etc/apt/sources.list.d/ports.list >/dev/null <<'PORTS'
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe
