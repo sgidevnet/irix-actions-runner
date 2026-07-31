@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   sleeper:
-    runs-on: [self-hosted, irix]
+    runs-on: [self-hosted, renewtest]
     timeout-minutes: 60
     steps:
       - name: Sleep past the ceiling
