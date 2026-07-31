@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.4.0-rc2] - 2026-07-31
+
 ### Changed
 
 - `runner serve` now defaults to `ghcr.io/sgidevnet/irix-worker:latest`. Use `--image` to pin a release or run a custom worker.
