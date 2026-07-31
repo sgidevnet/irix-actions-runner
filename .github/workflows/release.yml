@@ -218,7 +218,9 @@ jobs:
           cat build/BUILD-FACTS
 
           # The objects are half of build/ and nothing downstream reads them.
-          find build -name '*.o' -o -name '*.d' | xargs rm -f
+          # -exec rather than xargs: IRIX xargs runs the command once even on
+          # empty input, and there is no -r to stop it.
+          find build \( -name '*.o' -o -name '*.d' \) -exec rm -f {} \;
           ls -l build
 
       # One directory, not a list. This runner's upload-artifact takes a single
@@ -517,7 +519,17 @@ jobs:
           file build/runner
           # test-run executes the binaries as built; it never compiles.
           make test-run
+
+          # A clean environment, so this proves the binary resolves every
+          # symbol against a stock image and inherits nothing from the runner.
+          # The assertion moved here from build-linux, which cross-compiles and
+          # so cannot run what it produced.
+          echo "--- clean environment ---"
           env -i ./build/runner version
+          ver="${GITHUB_REF_NAME#v}"
+          if [ "$(env -i ./build/runner version | sed -n 1p)" != "irix-actions-runner $ver" ]; then
+            echo "the built binary does not report $ver"; exit 1
+          fi
 
       # No bundle ships on Linux, so what is under test is that the binary
       # finds the distribution's own store. The negative control is what makes

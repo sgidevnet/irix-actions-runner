@@ -103,25 +103,15 @@ jobs:
         name: build-linux-${{ matrix.arch }}
         path: build
     - name: Run the unit tests on real ${{ matrix.arch }}
-      run: 'set -euo pipefail
-
-        sudo apt-get update -qq
-
-        sudo apt-get install -y --no-install-recommends libssl3 || true
-
-        chmod 0755 build/* 2>/dev/null || true
-
-        uname -srm
-
-        file build/runner
-
-        # test-run executes the binaries as built; it never compiles.
-
-        make test-run
-
-        env -i ./build/runner version
-
-        '
+      run: "set -euo pipefail\nsudo apt-get update -qq\nsudo apt-get install -y --no-install-recommends\
+        \ libssl3 || true\nchmod 0755 build/* 2>/dev/null || true\nuname -srm\nfile build/runner\n# test-run\
+        \ executes the binaries as built; it never compiles.\nmake test-run\n\n# A clean environment,\
+        \ so this proves the binary resolves every\n# symbol against a stock image and inherits nothing\
+        \ from the runner.\n# The assertion moved here from build-linux, which cross-compiles and\n# so\
+        \ cannot run what it produced.\necho \"--- clean environment ---\"\nenv -i ./build/runner version\n\
+        ver=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*\"\\(.*\\)\".*/\\1/p' src/version.h)\n\
+        if [ \"$(env -i ./build/runner version | sed -n 1p)\" != \"irix-actions-runner $ver\" ]; then\n\
+        \  echo \"the built binary does not report $ver\"; exit 1\nfi\n"
     - name: TLS works against the system trust store
       run: "set -euo pipefail\nif SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null\
         \ 2>&1; then\n  echo \"selftest passed with a nonexistent bundle; this gate proves nothing\"\n\
