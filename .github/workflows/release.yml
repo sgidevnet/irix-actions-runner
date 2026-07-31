@@ -73,14 +73,14 @@ jobs:
   build-irix:
     needs: preflight
     runs-on: ubuntu-24.04
-    # Private by default: the sysroot inside it is SGI's headers and lib32.
-    # GITHUB_TOKEN can pull it once the package grants this repository access.
-    container:
-      image: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.1.0' }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    container: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.1.0' }}
     timeout-minutes: 30
+    # Named, not inherited. bash is in the image, but the runner's probe picked
+    # sh for the container and dash has no pipefail, so every step died on its
+    # first line.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
