@@ -151,13 +151,12 @@ pass here and fault on the Octane.
 make
 cp build/runner /tmp/pool/runner        # ETXTBSY while a serve holds it open
 cd /tmp/pool && ./runner serve --count 4 --name-prefix irix \
-    --image ghcr.io/sgidevnet/irix-worker:0.4.3-indy > serve.log 2>&1 &
+    > serve.log 2>&1 &
 gh workflow run irix.yml --ref <branch>
 ```
 
-**Always pass `--image`.** The default is the bare name `irix-worker:latest`,
-which Docker resolves against Docker Hub, so omitting it fails on a pull for an
-image that does not exist there. `ghcr.io/sgidevnet/irix-worker` is ours.
+The default worker is `ghcr.io/sgidevnet/irix-worker:latest`. Pass `--image`
+only to pin a release or use a custom worker.
 
 Kill a pool by a substring that cannot match your own command line. `pkill -f
 "runner serve"` matches the shell that is running it and takes the session down

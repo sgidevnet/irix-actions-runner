@@ -9,6 +9,7 @@
 #include "proto/report.h"
 #include "serve/dockerapi.h"
 #include "serve/exec.h"
+#include "serve/serve.h"
 
 #include "version.h"
 
@@ -51,7 +52,7 @@
 #define LABEL_SUPERVISOR "sgug.runner.supervisor"
 #define LABEL_STAGING "sgug.runner.staging"
 
-static char worker_image[256] = "irix-worker:latest";
+static char worker_image[256] = SGUG_DEFAULT_WORKER_IMAGE;
 static int deadline_secs = DEFAULT_DEADLINE_SECS;
 
 void

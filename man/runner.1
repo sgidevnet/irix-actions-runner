@@ -49,293 +49,248 @@ runner \- GitHub Actions self-hosted runner for SGI IRIX
 .br
 .B runner help
 .SH DESCRIPTION
-A clean-room reimplementation of the GitHub Actions runner wire protocol in
-C99, for IRIX 6.5.22 and later. The official runner is .NET and cannot run
-there.
-.PP
-The runtime is split client/server, and one binary is both halves. The server
-holds the registration and long-polls GitHub for work. The client is the job
-runtime: it takes one job as a message file, runs the steps and reports.
+Native GitHub Actions runner for IRIX 6.5.22 and later. Implements the runner
+protocol in C99.
 .PP
 .B run
-is both halves in one process and is what an SGI uses.
+listens for jobs and executes them in the current process.
 .B serve
-is the server alone, for a pool of registered identities on a Linux host, and
-hands each job it acquires to a container.
+runs a Linux-hosted pool and starts one worker container per job.
 .B execjob
-is the client alone, needs no registration, and reads the job message from a
-file.
+runs one job message without local runner configuration.
 .SH COMMANDS
 .SS configure
-Registers with GitHub and writes the runner state. Run once. Generates a
-2048\-bit RSA key and sends the public half; the registration token is not
-needed again, because every identity authenticates with that key from then on.
+Registers with GitHub and writes runner state. Generates a 2048-bit RSA key;
+the registration token is not used after registration.
 .TP
 .BI \-\-url " URL"
+Repository or organisation URL:
 .I https://github.com/ORG
 or
 .IR https://github.com/ORG/REPO .
 Required.
 .TP
 .BI \-\-token " TOKEN"
-A registration token, from the repository or organisation Settings page, or
-from
-.IR /repos/OWNER/REPO/actions/runners/registration-token .
-They expire in one hour. Required.
+Registration token from the repository or organisation Actions settings or
+registration-token API. Required. Tokens expire after one hour.
 .TP
 .BI \-\-name " NAME"
 Runner name. Defaults to the hostname, or
 .I irix\-runner
-when
+if
 .BR gethostname (3)
 fails. Excluded by
 .BR \-\-count .
 .TP
 .BI \-\-runnergroup " NAME"
-Runner group, default
+Runner group. Default:
 .IR Default .
-See
-.B NOTES
-below: a wrong group is silent.
+The group must have access to the target repository. A runner in an
+inaccessible group appears Online but receives no jobs.
 .TP
 .BI \-\-labels " A,B,C"
-Extra labels beyond the
-.IR irix ", " mips " and " mips\-n32
-every runner carries. At most 32 labels in total.
+Extra labels beyond
+.IR irix ,
+.I mips
+and
+.IR mips\-n32 .
+Maximum 32 labels in total.
 .TP
 .BI \-\-work " DIR"
-Work folder, default
+Work directory. Default:
 .IR _work .
 Excluded by
-.BR \-\-count ,
-which gives every identity its own.
+.BR \-\-count .
 .TP
 .B \-\-replace
-Take over an existing runner of this name. Without it, an existing
+Replace an existing runner with the same name. Without this flag, an existing
 .I .runner
-in the target directory is refused.
+file is refused.
 .TP
 .BI \-\-count " N"
-Register
-.I N
-identities rather than one, 1 to 64. Creates
-.IR P\-0 " through " P\-(N\-1)
-under the current directory, each named after its own directory, and adds an
+Register 1 to 64 identities as
+.IR P\-0 " through " P\-(N\-1) .
+Each identity gets its own directory, runner name and work directory, plus the
 .I emulated
 label. Requires
-.BR \-\-name\-prefix ,
-and excludes
+.BR \-\-name\-prefix ;
+excludes
 .BR \-\-name " and " \-\-work .
 .TP
 .BI \-\-name\-prefix " P"
-The prefix for
+Directory and runner-name prefix for
 .BR \-\-count .
-Names both the directory and the runner. At most 112 bytes.
+Maximum 112 bytes.
 .SS run
-Listens for jobs and executes them in this process. This is what makes the
-runner show Online. Runs on IRIX and on Linux.
+Listens for jobs and executes them in the current process. The configured
+runner appears Online while this command is running. Supported on IRIX and
+Linux.
 .TP
 .BI \-\-dir " DIR"
-Runner directory, default the current one.
+Runner directory. Default: current directory.
 .TP
 .BR \-\-verbose ", " \-\-trace
-Protocol logging, increasing.
+Enable protocol logging. Trace is more verbose.
 .SS serve
-One listener per identity, each job in its own container. Linux only; on IRIX
-it prints a message and returns 2.
+Linux only. Runs one listener per identity and one worker container per job.
+Returns 2 on IRIX.
 .PP
-Forks one child per identity, all before any network use, because the HTTP
-client caches one keep\-alive TLS connection per host and sharing it across
-children corrupts the stream. Every directory is checked before any fork, so a
-missing one aborts the whole command.
-.PP
-.BR SIGTERM " or " SIGINT
-is forwarded to every child exactly once, and the parent then waits for all of
-them, so no identity is left holding a pool session. A
+All identity directories are validated before listeners start. SIGINT and
+SIGTERM are forwarded to every listener. Startup removes worker containers
+left by a previous
 .B serve
-that starts after an unclean exit reaps the containers its predecessor left
-behind, identified by a
-.I sgug.runner.supervisor
-label naming a pid that no longer exists.
+process.
 .TP
 .BI \-\-count " N"
-Serve
-.I N
-identities, 1 to 64. Goes with
+Serve 1 to 64 identities. Requires
 .BR \-\-name\-prefix .
 .TP
 .BI \-\-name\-prefix " P"
-Directories
-.IR P\-0 ", " P\-1 ", ..."
+Use identity directories
+.IR P\-0 ,
+.IR P\-1 ,
+and so on.
 .TP
 .BI \-\-image " NAME"
-Worker image, default
-.IR irix\-worker:latest .
-An image the daemon does not have is pulled once and the create retried.
+Worker image. Default:
+.IR ghcr.io/sgidevnet/irix\-worker:latest .
+Missing images are pulled once before the create is retried.
 .TP
 .BI \-\-job\-timeout " SECS"
-Wall clock per job, 1 to 86400, default 14400. Measured with
-.B CLOCK_MONOTONIC
-from the moment the container starts. On expiry the container is killed and the
-job is reported failed from the host. Host\-side only: it is never propagated
-into the container.
+Container wall-clock limit, 1 to 86400 seconds. Default: 14400. Starts when the
+container starts. On expiry, the host kills the container and reports the job
+failed. Not passed into the guest.
 .TP
 .BR \-\-verbose ", " \-\-trace
-Protocol logging, increasing.
+Enable protocol logging. Trace is more verbose.
 .SS execjob
-Runs one job from a message file and reports it. Needs no configuration,
-because the message carries the credentials it reports with. This is what runs
-inside the worker container.
+Runs and reports one job message. The message contains its reporting
+credentials; no local registration is required. Used inside worker guests.
 .TP
 .BI \-\-message " FILE"
-The job message as received. Required.
+Job message file. Required.
 .TP
 .BI \-\-name " NAME"
-The runner name the job sees. Required.
+Runner name reported to the job. Required.
 .TP
 .BI \-\-work " DIR"
-Work folder. Must be absolute, and under 128 bytes. Required.
+Absolute work directory, under 128 bytes. Required.
 .TP
 .BI \-\-cancel\-file " PATH"
-Abort when this file's mtime changes. The file must already exist. Polled every
-5 seconds by a
-.B SIGALRM
-handler.
+Abort when the existing file's mtime changes. Polled every 5 seconds.
 .SS remove
-Deregisters and deletes the local configuration. Takes the same
+Deregisters the runner and deletes local configuration. Requires a fresh
+registration token. Accepts the same
 .BR \-\-count " and " \-\-name\-prefix
-as
-.BR configure ,
-and a fresh
-.BR \-\-token .
-Unlike
-.BR configure ,
-it continues past a failure and returns 1 at the end, so one unreachable
-identity does not strand the rest.
+pair as
+.BR configure .
+.PP
+For a pool, continues after individual failures and returns 1 if any identity
+failed.
 .SS status
-Prints the configured runner: name, URL, group and pool id, agent id, tenant,
-whether the v2 broker flow is in use, the JWT signing algorithm and the work
-folder. Takes
-.BI \-\-dir " DIR" .
-Returns 1 when nothing is configured there.
+Prints the runner name, URL, group, pool id, agent id, tenant, broker mode, JWT
+algorithm and work directory. Returns 1 if no runner is configured.
+.TP
+.BI \-\-dir " DIR"
+Runner directory. Default: current directory.
 .SS selftest
-Opens an HTTPS connection to
+Checks HTTPS against
 .I host
 (default
-.IR api.github.com )
-and reports the status, the server header, the body size, the clock skew
-against the server's
-.B Date
-header, whether the JSON parses, and whether a second request reuses the
-connection. On a Linux host it then reports the Docker daemon's version, or the
-reason its socket could not be reached.
+.IR api.github.com ):
+status, server header, body size, clock skew, JSON parsing and connection
+reuse. On Linux, also checks the Docker socket and prints the daemon version.
 .PP
-Run it before anything else. On an SGI a wrong clock and an expired CA bundle
-are the two things that break a fresh install, and both produce confusing
-errors later. On a Linux host those two come right from NTP and the distribution
-bundle, and the socket is what decides whether
-.B serve
-gets as far as starting a container. Returns 1 when any of it fails.
-.PP
-It says nothing about the worker image.
-.B serve
-pulls an image the daemon does not have, so an absent image is the ordinary
-state on a fresh host.
+Returns 1 if a check fails. Does not check or pull the worker image.
 .SS version
-Prints this runner's version and the protocol version it reports to the
-service. Also
+Prints the project version and reported protocol version. Also
 .BR \-\-version " and " \-V .
 .SS help
 Prints the usage summary. Also
 .BR \-\-help " and " \-h .
 .SH LABELS
-Every runner carries
-.IR irix ", " mips " and " mips\-n32 ,
+Every runner has the custom labels
+.IR irix ,
+.I mips
+and
+.IR mips\-n32 ,
 plus the system labels
-.IR self\-hosted ", " Linux " and " X64 .
-The last two are untrue and deliberate: GitHub's system label vocabulary has no
-IRIX or MIPS value, and a runner describing itself accurately would match no
+.IR self\-hosted ,
+.I Linux
+and
+.IR X64 .
+GitHub has no IRIX or MIPS system labels; use the custom labels in
 .IR runs\-on .
 .PP
 .B configure \-\-count
 adds
-.IR emulated ,
-so
-.I runs\-on: [self\-hosted, irix, emulated]
-pins a job to a container pool.
-.I runs\-on
-is an AND over labels with no negation, so nothing excludes that pool; keeping
-work on real hardware needs a label of its own from
-.BR \-\-labels .
+.IR emulated .
+For hardware-only jobs, add a hardware label with
+.B \-\-labels
+and require it in
+.IR runs\-on .
 .SH FILES
 .TP
 .I .runner
-Agent id, name, pool and server URLs. Mode 0644.
+Runner identity and server URLs. Mode 0644.
 .TP
 .I .credentials
 OAuth client id and token endpoint. Mode 0600.
 .TP
 .I .rsakey
-The private key, PKCS#1 PEM. Mode 0600. A warning is printed if the mode is
-anything else.
+PKCS#1 PEM private key. Mode 0600. Other modes produce a warning.
 .TP
 .I cert.pem
-Trust roots. Adopted automatically when it sits beside the binary.
+Trust roots. Used automatically when located beside the binary.
 .PP
-Under
 .B \-\-count
-there is one set of the first three per identity directory.
+stores one set of runner files in each identity directory.
 .SH ENVIRONMENT
 .TP
 .B SGUG_RUNNER_OS
-The OS the runner claims. Default
-.IR Linux ,
-see
-.BR LABELS .
-Reaches the acquirejob request, the message poll query and the
-.B RUNNER_OS
-variable given to steps.
+OS value sent to GitHub and exported to steps as
+.BR RUNNER_OS .
+Default:
+.IR Linux .
 .TP
 .B SSL_CERT_FILE
-Trust roots. Set automatically from a
+Trust-root file. If unset, the runner uses
 .I cert.pem
-beside the binary when unset. SGUG\-RSE's own bundle at
-.I /usr/sgug/etc/pki/tls/cert.pem
-is used when neither is present.
+beside the binary, then
+.IR /usr/sgug/etc/pki/tls/cert.pem .
 .TP
 .B DOCKER_HOST
-Overrides
+Docker socket for
+.BR serve .
+Default:
 .IR /var/run/docker.sock .
-Only a
+Only
 .I unix://
-path is accepted; any other form is an error rather than a silent fallback.
-.B serve
-only.
+URLs are accepted.
 .TP
 .B TMPDIR
-Where
-.B serve
-creates each job's staging directory, mode 0700. Defaults to
+Parent for mode 0700 job directories created by
+.BR serve .
+Default:
 .IR /tmp .
 .TP
 .B SGUG_DUMP_MESSAGES
-Prints every message body received. Job messages carry access tokens and every
-secret the workflow references, so this belongs in a debugging session and
-nowhere else.
+Print every received message body. Messages contain access tokens and workflow
+secrets. For protocol debugging only.
 .SH EXIT STATUS
 .TP
 .B 0
 Success.
 .TP
 .B 1
-The command ran and failed.
+Command failed.
 .TP
 .B 2
-Usage error, an unknown command, or
+Usage error, unknown command, or
 .B serve
 on IRIX.
 .SH EXAMPLES
-Register one runner against a repository and start it:
+Register and run one repository runner:
 .PP
 .RS
 .nf
@@ -344,35 +299,22 @@ runner run
 .fi
 .RE
 .PP
-Register four identities against an organisation, in a group that has access to
-the repositories whose workflows are queued, and serve them:
+Register and serve four organisation runners:
 .PP
 .RS
 .nf
 runner configure \-\-url https://github.com/ORG \-\-token TOK \\
     \-\-count 4 \-\-name\-prefix irix \-\-runnergroup IRIX
-runner serve \-\-count 4 \-\-name\-prefix irix \\
-    \-\-image ghcr.io/sgidevnet/irix\-worker:0.4.3\-indy
+runner serve \-\-count 4 \-\-name\-prefix irix
 .fi
 .RE
 .SH NOTES
-A wrong
-.B \-\-runnergroup
-is quiet. The runner registers, shows Online, and is never dispatched to,
-because the group it landed in has no access to the repository whose workflow
-is queued. The group's repository access is under the organisation's Actions
-settings.
-.PP
-Nothing renews a job lock. A job that is acquired and never completed leaves
-that identity online at
+An acquired job must be completed. A job lost before completion leaves the
+identity Online at
 .I currentParallelism 1
-and never dispatched to again.
+but unavailable for further dispatch.
 .SH SEE ALSO
 .BR docker (1),
 .BR gh (1)
 .PP
 .I https://github.com/sgidevnet/irix\-actions\-runner
-.PP
-.I docs/protocol.md
-in the source tree records where github.com diverges from its own published
-documentation.

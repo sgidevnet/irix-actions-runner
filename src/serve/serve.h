@@ -10,6 +10,7 @@
 
 /* configure --count is capped here: serve's child array is fixed at this. */
 #define SGUG_MAX_IDENTITIES 64
+#define SGUG_DEFAULT_WORKER_IMAGE "ghcr.io/sgidevnet/irix-worker:latest"
 
 typedef struct {
 	const char *name_prefix;	/* NULL runs one identity in "." */

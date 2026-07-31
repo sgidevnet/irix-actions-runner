@@ -1,13 +1,20 @@
 ---
 name: irix-workflows
-description: What a GitHub Actions workflow can and cannot do on an irix-actions-runner self-hosted runner. Load before writing or editing any file under .github/workflows/ that targets `runs-on: [self-hosted, irix]`, and before debugging a step that failed or silently did nothing on one. Covers the three supported `uses:` actions, the expression subset, the step environment, and the divergences from github.com that produce no error at all.
+description: >-
+  Support matrix and authoring rules for GitHub Actions workflows targeting an
+  irix-actions-runner self-hosted runner. Load before writing or editing files
+  under .github/workflows/ that use `runs-on: [self-hosted, irix]`, and before
+  debugging a step that failed or silently did nothing on one. Covers the three
+  supported `uses:` actions, expressions, the step environment, and silent
+  divergences from github.com.
 ---
 
 # irix-workflows
 
-A C99 reimplementation of the Actions wire protocol for SGI IRIX. Most workflow
-YAML runs unchanged; what follows is what does not. `reference.md` carries the
-exhaustive matrix with a `file:line` for every row.
+Most workflow YAML runs unchanged. This file lists the exceptions that matter
+when writing one. Read [reference.md](reference.md) for exact action inputs,
+expressions, contexts, environment variables, shell behaviour, limits and step
+semantics. It cites the implementation or repository record for each claim.
 
 ## Three `uses:` handlers, and nothing else
 
@@ -44,16 +51,14 @@ against the path you gave, so `path: out` produces members named `out/hello`
 where the reference action strips that component. A download with no `path:`
 therefore lands at `out/hello`, and `path: all` lands at `all/out/hello`.
 
-So in a workflow whose jobs span both kinds of runner, an artifact's shape
-depends on which end packed it, and a download written for one is wrong for the
-other. Always name `path:` on the download rather than relying on where the
-members land.
+In a workflow spanning both runner types, the artifact's shape depends on which
+runner packed it. Always name `path:` on the download.
 
 Download's `path:` also gets a single `mkdir`, so `path: all/0` fails with
 `download-artifact: cannot create ...`.
 
-Fanning several artifacts back in is easier on a hosted runner. `ubuntu-latest`
-has the real action, with `pattern:` and `merge-multiple:`.
+Fan several artifacts back in on a hosted runner when possible. The real action
+supports `pattern:` and `merge-multiple:`.
 
 ## Steps cannot pass values to each other
 
@@ -69,12 +74,23 @@ exported, so `$NAME` in a `run:` body is empty. Put the value in the text.
 
 There is no `$GITHUB_TOKEN`, so a step cannot call the REST API.
 
+`PATH` is fixed at
+`/usr/sgug/bin:/usr/sgug/sbin:/usr/bin:/bin:/usr/sbin:/usr/bsd`. Nekoware and
+Freeware are not on it, so a step reaching for `/usr/nekoware/bin/gcc` has to
+extend `PATH` itself, and has to do it again in every step that needs it. The
+emulated worker image puts `gcc` and `curl` there, where a full SGUG-RSE install
+puts `gcc` on the fixed path already. Nekoware `curl` also needs
+`--cacert /usr/sgug/etc/pki/tls/certs/ca-bundle.crt` for HTTPS.
+
 ## Expressions
 
-`${{ }}` is evaluated in a `run:` body, a `with:` value and `if:`. Available:
-`contains` `startsWith` `endsWith` `format` `join` `toJSON` `fromJSON`
-`success` `always` `failure` `cancelled`.
+`${{ }}` is evaluated in step `name:`, `if:`, `run:`, `shell:`,
+`working-directory:` and every `with:` value. Available: `contains`
+`startsWith` `endsWith` `format` `join` `toJSON` `fromJSON` `success` `always`
+`failure` `cancelled`, plus the local, nonportable `case` function.
 
+- A bad expression in `name:` leaves the literal name. It does not fail the
+  job.
 - `hashFiles()` parses and then fails when the step runs, which kills the usual
   `actions/cache` key idiom.
 - **An unknown function is a parse error even on a branch that short circuits.**
@@ -115,6 +131,15 @@ those other runners carry and the pool does not.
 An organisation runner can also be withheld by its runner group, in which case
 it shows Online and the job queues forever. That is an operator setting, not
 something a workflow can express.
+
+`emulated` selects an Indy running under iris. It is not an ISA portability
+gate: iris executes MIPS IV instructions regardless of the emulated CPU. A
+build can pass there and fault on an R4000 or R5000. Verify portability on real
+hardware.
+
+Do not use outbound `ping` as a reachability check under `runner serve`. It
+depends on the Docker host's `net.ipv4.ping_group_range`; the NAT gateway may
+still answer when the internet does not.
 
 ## Identity, timeouts and limits
 
