@@ -1,10 +1,16 @@
 UNAME_S := $(shell uname -s)
 
+# `uname -s` is IRIX64 on a 64-bit kernel and plain IRIX on a 32-bit one, so an
+# Indy reports IRIX where an Octane reports IRIX64. Matching only IRIX64 sent
+# every 32-bit machine down the Linux branch, where it picked up -D_GNU_SOURCE
+# and a dynamic OpenSSL and failed on the first header.
+IS_IRIX := $(filter IRIX IRIX64,$(UNAME_S))
+
 BUILD   := build
 
 # src/serve/ is host-only. Excluded here rather than behind an #if, which would
 # leave MIPSPro an empty translation unit; ISO C forbids that.
-ifeq ($(UNAME_S),IRIX64)
+ifneq ($(IS_IRIX),)
 PLATFORM_SRCS :=
 else
 PLATFORM_SRCS := $(wildcard src/serve/*.c)
@@ -22,7 +28,7 @@ TEST_BINS := $(TEST_SRCS:test/%.c=$(BUILD)/%)
 
 WARNS   := -Wall -Wextra -Wno-unused-parameter
 
-ifeq ($(UNAME_S),IRIX64)
+ifneq ($(IS_IRIX),)
 SGUG    := /usr/sgug
 CC      := $(SGUG)/bin/gcc
 # -Isrc must precede the SGUG include dir. SGUG ships JsonCpp at
@@ -85,7 +91,7 @@ check:
 	@! grep -rn '%[-+ #0-9.*]*z[udixX]' src/ test/ \
 	  || { echo "error: %z format specifier segfaults on IRIX, see CLAUDE.md"; exit 1; }
 	@echo "ok: no %z format specifiers"
-ifeq ($(UNAME_S),IRIX64)
+ifneq ($(IS_IRIX),)
 	@mkdir -p $(BUILD)/mipspro
 	@for f in $(SRCS); do \
 	  echo "c99 $$f"; \
