@@ -70,10 +70,18 @@ jobs:
           echo "contrib/cacert.pem carries $n certificates"
           if [ "$n" -lt 100 ]; then echo "bundle looks truncated"; exit 1; fi
 
-  build-irix:
+  # The MIPSPro half of `make check`, which is the project's second compiler and
+  # the one thing here that no Linux machine can do. It is its own job because
+  # the build no longer runs on IRIX: without this, a cross-compiled release
+  # would ship having been seen by one compiler.
+  #
+  # `make check` gates the MIPSPro sweep on uname, so this has to land on a
+  # machine that actually has c99. An emulated Indy does not; label the Octane
+  # and target that label if the pool ever grows past one kind of machine.
+  portability-irix:
     needs: preflight
     runs-on: [self-hosted, irix]
-    timeout-minutes: 180
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,19 +96,31 @@ jobs:
           # does not remove untracked files, so a release could otherwise
           # inherit object files from an unrelated commit.
           git clean -xdff
-          # Packaging moved to a hosted runner, so this machine no longer needs
-          # sha256sum or a GNU tar. What is left is the build and the checks
-          # that only mean something here.
-          for t in git readelf strings file sed awk; do
-            command -v "$t" >/dev/null || { echo "missing: $t"; exit 1; }
-          done
-          /usr/sgug/bin/gcc --version | sed -n 1p
           test -x /usr/bin/c99 || { echo "MIPSPro c99 is not installed"; exit 1; }
+
+      - name: Portability gate
+        run: |
+          set -eu
+          make clean
+          make check
+
+  # Cross-compiled, because GCC dropped mips-sgi-irix6.5 in the 4.8 era and
+  # clang is the only current compiler that targets this machine. The image is
+  # built from contrib/cross/Dockerfile and carries clang, mogrix's IRIX LLD and
+  # an OpenSSL cross-built with the same toolchain. What it cannot do is run the
+  # result, which is what test-irix is for.
+  build-irix:
+    needs: preflight
+    runs-on: ubuntu-24.04
+    container: ${{ vars.IRIX_CROSS_IMAGE || 'ghcr.io/sgidevnet/irix-cross:0.1.0' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
 
       # Repeated from preflight, against the tree that was actually checked out.
       - name: Version agrees with the checked-out tree
         run: |
-          set -eu
+          set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
           hdr=$(sed -n 's/^#define[[:space:]]*SGUG_PROJECT_VERSION[[:space:]]*"\(.*\)".*/\1/p' src/version.h)
           if [ "$hdr" != "$ver" ]; then
@@ -115,31 +135,26 @@ jobs:
           fi
           echo "building $ver from $GITHUB_SHA"
 
-      # Each make target is its own step: the per-step deadline is 3600s of wall
-      # clock and is not configurable from the workflow, and a MIPSPro pass over
-      # every source file is not fast here.
+      # The %z grep half. The MIPSPro half is portability-irix's job; this
+      # target skips it off IRIX and says so.
       - name: Portability gate
         run: |
-          set -eu
-          make clean
+          set -euo pipefail
           make check
 
-      - name: Build
+      - name: Build the runner and the test binaries
         run: |
-          set -eu
-          make -j2
-          ls -l build/runner
-
-      # Built here and run in test-irix, so the binaries under test come from
-      # the same toolchain and the same tree as the one being shipped.
-      - name: Build the test binaries
-        run: |
-          set -eu
-          make -j2 tests
+          set -euo pipefail
+          # IRIX_SYSROOT is what puts the Makefile on its cross branch. The
+          # image sets it, along with IRIX_OPENSSL and MOGRIX_NO_DLMALLOC.
+          test -n "${IRIX_SYSROOT:-}" || { echo "not an IRIX cross image"; exit 1; }
+          make -j"$(nproc)"
+          make -j"$(nproc)" tests
+          ls -l build/runner build/test_json
 
       - name: The binary is portable to any IRIX 6.5 machine
         run: |
-          set -eu
+          set -euo pipefail
           desc=$(file build/runner)
           echo "$desc"
           # MIPS III is R4000 and later, which is every CPU that runs IRIX 6.5.
@@ -151,7 +166,7 @@ jobs:
           esac
           case "$desc" in *MSB*) ;; *) echo "not big-endian"; exit 1 ;; esac
 
-          readelf -d build/runner | grep -E 'NEEDED|RPATH'
+          readelf -d build/runner | grep -E 'NEEDED|RPATH' || true
           needed=$(readelf -d build/runner | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p' | sort | tr '\n' ' ')
           if [ "$needed" != "libc.so.1 libm.so libpthread.so " ]; then
             echo "unexpected library dependencies: $needed"; exit 1
@@ -162,77 +177,26 @@ jobs:
             fi
           done
 
-          # Proves rld resolves every symbol against base IRIX, with no
-          # LD_LIBRARYN32_PATH and nothing inherited from the runner. This is
-          # the closest a single machine can get to "starts on a stock box".
-          echo "--- clean environment ---"
-          env -i ./build/runner version
-          ver="${GITHUB_REF_NAME#v}"
-          if [ "$(env -i ./build/runner version | sed -n 1p)" != "irix-actions-runner $ver" ]; then
-            echo "the built binary does not report $ver"; exit 1
-          fi
-
-      - name: TLS works against the bundle we ship
+      - name: Record what built it
         run: |
-          set -eu
-          ca="$PWD/contrib/cacert.pem"
-          n=$(grep -c 'BEGIN CERTIFICATE' "$ca")
-          echo "bundle carries $n certificates"
-          if [ "$n" -lt 100 ]; then echo "bundle looks truncated"; exit 1; fi
-
-          # Negative control. Without it a future change that ignores
-          # SSL_CERT_FILE would leave this gate passing forever while proving
-          # only that SGUG-RSE happens to be installed on the build machine.
-          if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
-            echo "selftest passed with a nonexistent bundle; this gate proves nothing"
-            exit 1
-          fi
-          echo "negative control ok"
-
-          i=1
-          while [ "$i" -le 3 ]; do
-            if SSL_CERT_FILE="$ca" ./build/runner selftest; then break; fi
-            if [ "$i" -eq 3 ]; then echo "selftest failed three times"; exit 1; fi
-            sleep 20
-            i=$((i + 1))
-          done
-
-      # Only the binary leaves IRIX. Every ELF assertion and the tarball are
-      # done on a hosted runner, which has GNU tar and coreutils; the guest and
-      # the Octane need neither. `strip` cannot move: binutils on x86 has no
-      # MIPS BFD target and refuses the file outright.
-      - name: Strip, prove it still runs, and record what built it
-        run: |
-          set -eu
-          strip build/runner
-          ls -l build/runner
-          env -i ./build/runner version
-
-          # The packaging job cannot see this machine, so the facts that only
-          # exist here travel with the binary.
+          set -euo pipefail
           {
-            echo "built on   $(uname -a)"
-            echo "compiler   $(/usr/sgug/bin/gcc --version | sed -n 1p)"
+            echo "built on   $(uname -a) (cross)"
+            echo "compiler   $(clang --version | sed -n 1p)"
+            echo "linker     $(basename "$IRIX_LLD")"
             echo "openssl    $(strings -a build/runner | grep '^OpenSSL 1\.' | sed -n 1p)"
           } > build/BUILD-FACTS
           cat build/BUILD-FACTS
+          find build \( -name '*.o' -o -name '*.d' \) -delete
 
-          # The objects are half of build/ and nothing downstream reads them.
-          # -exec rather than xargs: IRIX xargs runs the command once even on
-          # empty input, and there is no -r to stop it.
-          find build \( -name '*.o' -o -name '*.d' \) -exec rm -f {} \;
-          ls -l build
-
-      # One directory, not a list. This runner's upload-artifact takes a single
-      # path and keeps its leading component, so the members are build/... and
-      # a download with no path: lands them back where make test-run looks.
       - uses: actions/upload-artifact@v4
         with:
           name: irix-binary
           path: build
 
-  # A child stage rather than a step inside build-irix, so a test failure is
-  # distinguishable from a build failure and neither blocks the Linux half.
+  # The only machine that can say whether the cross build works. Nothing here
+  # compiles: it runs what build-irix produced, and strips it, because binutils
+  # on x86 has no MIPS BFD target and refuses the file outright.
   test-irix:
     needs: build-irix
     runs-on: [self-hosted, irix]
@@ -257,8 +221,59 @@ jobs:
       - name: Run the unit tests on IRIX
         run: |
           set -eu
-          chmod 0755 build/test_*
+          chmod 0755 build/runner build/test_*
           make test-run
+
+      - name: The binary starts on a stock machine
+        run: |
+          set -eu
+          # env -i proves rld resolves every symbol against base IRIX, with no
+          # LD_LIBRARYN32_PATH and nothing inherited from the runner.
+          echo "--- clean environment ---"
+          env -i ./build/runner version
+          ver="${GITHUB_REF_NAME#v}"
+          if [ "$(env -i ./build/runner version | sed -n 1p)" != "irix-actions-runner $ver" ]; then
+            echo "the built binary does not report $ver"; exit 1
+          fi
+
+      - name: TLS works against the bundle we ship
+        run: |
+          set -eu
+          ca="$PWD/contrib/cacert.pem"
+          n=$(grep -c 'BEGIN CERTIFICATE' "$ca")
+          echo "bundle carries $n certificates"
+          if [ "$n" -lt 100 ]; then echo "bundle looks truncated"; exit 1; fi
+
+          # Negative control. Without it a future change that ignores
+          # SSL_CERT_FILE would leave this gate passing forever while proving
+          # only that SGUG-RSE happens to be installed on the machine.
+          if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
+            echo "selftest passed with a nonexistent bundle; this gate proves nothing"
+            exit 1
+          fi
+          echo "negative control ok"
+
+          i=1
+          while [ "$i" -le 3 ]; do
+            if SSL_CERT_FILE="$ca" ./build/runner selftest; then break; fi
+            if [ "$i" -eq 3 ]; then echo "selftest failed three times"; exit 1; fi
+            sleep 20
+            i=$((i + 1))
+          done
+
+      - name: Strip, and prove it still runs
+        run: |
+          set -eu
+          strip build/runner
+          ls -l build/runner
+          env -i ./build/runner version
+          rm -f build/test_*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: irix-stripped
+          path: build
+
 
   # Everything a MIPS binary can be asserted about from x86: `file` and
   # `readelf` are target-independent readers. `strip` is not, which is why it
@@ -272,7 +287,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: irix-binary
+          name: irix-stripped
           path: bin
 
       - name: The binary is portable to any IRIX 6.5 machine
@@ -616,7 +631,7 @@ jobs:
           path: dist
 
   publish:
-    needs: [package-irix, package-linux]
+    needs: [portability-irix, package-irix, package-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
