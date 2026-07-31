@@ -820,9 +820,11 @@ report_flush(sgug_reporter *r, int force)
  * Failure is not fatal. A renewal that does not land costs nothing until the
  * lease actually expires, and a job that is nearly done should not be killed
  * by one bad request.
+ *
+ * force ignores the interval, for the one caller that is about to stop ticking.
  */
 static void
-renew_job(sgug_reporter *r)
+renew_job(sgug_reporter *r, int force)
 {
 	sgug_jsonw *w;
 	char url[SGUG_MAX_URL];
@@ -832,7 +834,7 @@ renew_job(sgug_reporter *r)
 
 	if (r->job->service_url[0] == '\0')
 		return;
-	if (sgug_monotonic_ms() < r->renew_due)
+	if (!force && sgug_monotonic_ms() < r->renew_due)
 		return;
 	r->renew_due = sgug_monotonic_ms() + RENEW_INTERVAL_MS;
 
@@ -860,7 +862,7 @@ renew_job(sgug_reporter *r)
 int
 sgug_report_flush(sgug_reporter *r)
 {
-	renew_job(r);
+	renew_job(r, 0);
 	return report_flush(r, 0);
 }
 
@@ -991,6 +993,15 @@ sgug_report_job_finished(sgug_reporter *r, sgug_result result)
 	const char *body;
 	size_t len, i;
 	int rc;
+
+	/*
+	 * The tail of a job is the one stretch with no child process running,
+	 * so nothing ticks and nothing else renews: the whole-job log blob
+	 * uploads in blocks of up to LOG_BLOCK and completejob follows. Losing
+	 * the lease here loses the job after all its work is done, which is
+	 * the failure this renewal exists to prevent.
+	 */
+	renew_job(r, 1);
 
 	w = begin_records(1);
 	if (w == NULL)
