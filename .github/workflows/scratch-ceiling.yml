@@ -1,0 +1,27 @@
+name: scratch ceiling
+
+# Temporary. One step that sleeps past ten minutes, to find the job ceiling
+# without a build in the way. Delete before merging.
+
+on:
+  push:
+    branches: [probe/job-ceiling]
+
+permissions:
+  contents: read
+
+jobs:
+  sleeper:
+    runs-on: [self-hosted, irix]
+    timeout-minutes: 60
+    steps:
+      - name: Sleep past the ceiling
+        run: |
+          set -eu
+          i=0
+          while [ $i -lt 24 ]; do
+            echo "tick $i at $(date -u +%H:%M:%S)"
+            sleep 30
+            i=$((i + 1))
+          done
+          echo SLEPT_720
