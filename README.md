@@ -258,8 +258,8 @@ flowchart LR
   GH -->|Dispatches job| SERVE
 ```
 
-Virtualized Indys run on [iris](https://github.com/techomancer/iris),
-techomancer's SGI Indy emulator.
+Virtualized Indys run on
+[techomancer/iris](https://github.com/techomancer/iris).
 
 `serve`:
 
@@ -361,7 +361,8 @@ Every surviving SGI machine was locked out of modern CI.
 
 ## Authorship
 
-Built by [@mach-kernel](https://github.com/mach-kernel) with Claude Opus 5.
+Built by [@mach-kernel](https://github.com/mach-kernel) with Claude Opus 5 and
+GPT-5.6-sol.
 
 ## License
 
