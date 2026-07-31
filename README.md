@@ -89,12 +89,11 @@ Register one identity per concurrent job:
 Start the pool:
 
 ```sh
-./runner serve --count 4 --name-prefix irix \
-    --image ghcr.io/sgidevnet/irix-worker:0.4.3-indy
+./runner serve --count 4 --name-prefix irix
 ```
 
-- Always pass `--image`. The default `irix-worker:latest` resolves against
-  Docker Hub, where it does not exist.
+- The default worker is `ghcr.io/sgidevnet/irix-worker:latest`.
+- Use `--image` to pin a release or run a custom worker.
 - `--count 4` creates `irix-0` through `irix-3`.
 - Each identity has separate credentials and a separate work directory.
 - One registration token covers the pool.

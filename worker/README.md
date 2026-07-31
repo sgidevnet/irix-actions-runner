@@ -2,9 +2,11 @@
 
 Runs one CI job inside an emulated SGI Indy and exits. This is the guest half
 of the `/job` contract in `src/serve/exec.h`; `runner serve` starts one of
-these per job, and needs `--image` to point at it.
+these per job. The built-in default is:
 
-    ghcr.io/sgidevnet/irix-worker:0.4.3-indy
+    ghcr.io/sgidevnet/irix-worker:latest
+
+Use `--image` to pin a release or run a custom build.
 
 ## Building
 

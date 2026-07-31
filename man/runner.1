@@ -153,7 +153,7 @@ and so on.
 .TP
 .BI \-\-image " NAME"
 Worker image. Default:
-.IR irix\-worker:latest .
+.IR ghcr.io/sgidevnet/irix\-worker:latest .
 Missing images are pulled once before the create is retried.
 .TP
 .BI \-\-job\-timeout " SECS"
@@ -305,8 +305,7 @@ Register and serve four organisation runners:
 .nf
 runner configure \-\-url https://github.com/ORG \-\-token TOK \\
     \-\-count 4 \-\-name\-prefix irix \-\-runnergroup IRIX
-runner serve \-\-count 4 \-\-name\-prefix irix \\
-    \-\-image ghcr.io/sgidevnet/irix\-worker:0.4.3\-indy
+runner serve \-\-count 4 \-\-name\-prefix irix
 .fi
 .RE
 .SH NOTES
