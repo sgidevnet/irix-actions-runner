@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Version agrees across tag, header, changelog and manpage
+      - name: Version
         run: |
           set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
@@ -64,7 +64,7 @@ jobs:
           fi
           echo "version $ver agrees"
 
-      - name: CA bundle is present and plausible
+      - name: CA bundle
         run: |
           set -euo pipefail
           n=$(grep -c 'BEGIN CERTIFICATE' contrib/cacert.pem)
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Repeated from preflight, against the tree that was actually checked out.
-      - name: Version agrees with the checked-out tree
+      - name: Version
         run: |
           set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
@@ -111,7 +111,7 @@ jobs:
           set -euo pipefail
           make check
 
-      - name: Build the runner and the test binaries
+      - name: Build
         run: |
           set -euo pipefail
           # IRIX_SYSROOT is what puts the Makefile on its cross branch. The
@@ -121,7 +121,7 @@ jobs:
           make -j"$(nproc)" tests
           ls -l build/runner build/test_json
 
-      - name: The binary is portable to any IRIX 6.5 machine
+      - name: ELF assertions
         run: |
           set -euo pipefail
           desc=$(file build/runner)
@@ -149,7 +149,7 @@ jobs:
       # llvm-strip, not strip: binutils on x86 has no MIPS BFD target, but LLVM's
       # reads this file happily. SGUG's own strip dies with SIGILL on an
       # LLD-produced binary, so IRIX is the wrong place for this anyway.
-      - name: Strip and record what built it
+      - name: Strip and stamp
         run: |
           set -euo pipefail
           llvm-strip build/runner
@@ -183,7 +183,7 @@ jobs:
 
       # Before the download, not after: this runner never wipes the workspace,
       # and git clean would take the artifact with it.
-      - name: Clean the workspace
+      - name: Clean
         run: |
           set -eu
           git clean -xdff
@@ -198,13 +198,13 @@ jobs:
           name: irix-binary
           path: build
 
-      - name: Run the unit tests on IRIX
+      - name: Unit tests
         run: |
           set -eu
           chmod 0755 build/runner build/test_*
           make test-run
 
-      - name: The binary starts on a stock machine
+      - name: Clean-environment start
         run: |
           set -eu
           # env -i proves rld resolves every symbol against base IRIX, with no
@@ -216,7 +216,7 @@ jobs:
             echo "the built binary does not report $ver"; exit 1
           fi
 
-      - name: TLS works against the bundle we ship
+      - name: TLS selftest
         run: |
           set -eu
           ca="$PWD/contrib/cacert.pem"
@@ -257,7 +257,7 @@ jobs:
           name: irix-binary
           path: bin
 
-      - name: The binary is portable to any IRIX 6.5 machine
+      - name: ELF assertions
         run: |
           set -euo pipefail
           # download-artifact does not restore Unix modes. 0755 is the intent,
@@ -378,7 +378,7 @@ jobs:
           cc --version | sed -n 1p
           ldd --version | sed -n 1p
 
-      - name: Version agrees with the checked-out tree
+      - name: Version
         run: |
           set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
@@ -398,7 +398,7 @@ jobs:
           make clean
           make check
 
-      - name: Build the runner and the test binaries
+      - name: Build
         run: |
           set -euo pipefail
           if [ -n "${{ matrix.triple }}" ]; then
@@ -410,7 +410,7 @@ jobs:
           make -j"$(nproc)" CC="${CC:-cc}" tests
           ls -l build/runner build/test_json
 
-      - name: The binary is what this matrix entry claims
+      - name: ELF assertions
         run: |
           set -euo pipefail
           desc=$(file build/runner)
@@ -448,7 +448,7 @@ jobs:
       # strip has to happen here for the same reason: the target's binutils are
       # installed on this machine and not on the packaging one. The Linux half
       # of CFLAGS carries -g, so an unstripped runner is most of the tarball.
-      - name: Strip, prove it still runs, and record what built it
+      - name: Strip and stamp
         run: |
           set -euo pipefail
           if [ -n "${{ matrix.triple }}" ]; then
@@ -491,7 +491,7 @@ jobs:
           name: build-linux-${{ matrix.arch }}
           path: build
 
-      - name: Run the unit tests on real ${{ matrix.arch }}
+      - name: Unit tests
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -517,7 +517,7 @@ jobs:
       # finds the distribution's own store. The negative control is what makes
       # that a claim: without it this passes on a build that ignores
       # SSL_CERT_FILE and never reads a store at all.
-      - name: TLS works against the system trust store
+      - name: TLS selftest
         run: |
           set -euo pipefail
           if SSL_CERT_FILE=/nonexistent/ca.pem ./build/runner selftest >/dev/null 2>&1; then
@@ -610,7 +610,7 @@ jobs:
           pattern: '*-dist*'
           path: dl
 
-      - name: Verify what came off the build machines
+      - name: Verify tarballs
         run: |
           set -euo pipefail
           n=0
@@ -675,7 +675,7 @@ jobs:
           cat body.md >> notes.md
           cat notes.md
 
-      - name: Create or update the draft release
+      - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
