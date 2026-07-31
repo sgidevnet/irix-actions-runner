@@ -69,6 +69,13 @@ exported, so `$NAME` in a `run:` body is empty. Put the value in the text.
 
 There is no `$GITHUB_TOKEN`, so a step cannot call the REST API.
 
+`PATH` is fixed at
+`/usr/sgug/bin:/usr/sgug/sbin:/usr/bin:/bin:/usr/sbin:/usr/bsd`. Nekoware and
+Freeware are not on it, so a step reaching for `/usr/nekoware/bin/gcc` has to
+extend `PATH` itself, and has to do it again in every step that needs it. The
+emulated worker image puts `gcc` and `curl` there, where a full SGUG-RSE install
+puts `gcc` on the fixed path already.
+
 ## Expressions
 
 `${{ }}` is evaluated in a `run:` body, a `with:` value and `if:`. Available:

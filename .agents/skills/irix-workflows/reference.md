@@ -134,6 +134,12 @@ context is empty (`lex.c:148-150`).
 Built from scratch, not inherited (`src/exec/runjob.c:103-174`). `MAX_ENV` is
 64 (`runjob.c:21`).
 
+`PATH` is the literal
+`/usr/sgug/bin:/usr/sgug/sbin:/usr/bin:/bin:/usr/sbin:/usr/bsd`
+(`runjob.c:123-124`), and `which` resolves bare program names against the same
+list minus `/usr/sgug/sbin` (`step.c:288-290`). Neither `/usr/nekoware/bin` nor
+`/usr/freeware/bin` is on it.
+
 Fixed: `PATH`, `HOME`, `SHELL`, `LC_ALL=C`, `TERM=dumb`, `LD_LIBRARYN32_PATH`,
 `RUNNER_OS`, `RUNNER_ARCH`, `RUNNER_NAME`, `RUNNER_TEMP`, `RUNNER_WORKSPACE`,
 `RUNNER_TOOL_CACHE`, `CI=true`, `GITHUB_ACTIONS=true`, `GITHUB_WORKSPACE`,
